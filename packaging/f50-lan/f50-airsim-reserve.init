@@ -1,0 +1,11 @@
+#!/bin/sh /etc/rc.common
+START=10
+
+boot() {
+    local root=/mnt/mu300-disk/extra/airsim-f50
+    [ -x "$root/bin/mu300-audio-dsp" ] || return 1
+    "$root/bin/mu300-audio-dsp" reserve 2>&1 | logger -t f50-airsim-reserve
+    [ "$(cat /sys/module/audio_reserve/parameters/missing 2>/dev/null)" = 0 ]
+}
+
+start() { :; }
