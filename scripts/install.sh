@@ -1,7 +1,7 @@
 #!/bin/sh
 # Fixed-release installer. Inspect this file before running as root on the MU300.
 set -eu
-RELEASE=0.1.0-r22
+RELEASE=0.1.0-r23
 BASE=https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v$RELEASE
 KEY_SHA=0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de
 PACKAGE=luci-app-airsim-$RELEASE.apk

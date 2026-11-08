@@ -96,10 +96,10 @@ return view.extend({
    buttons.pair_start.textContent = pending === 'pair_start' ? '正在获取…' : paired ? '重新获取配对码' : '获取配对码';
    buttons.number_refresh.textContent = pending === 'number_refresh' ? '正在读取…' : '重新读取号码';
    set('stopHint', s.calls && s.calls.available === false ? '通话状态待确认，暂不能关闭服务。' : s.call_active ? '通话结束后才能关闭服务。' : '关闭服务将停止电话网关与 Bonjour 发现。');
-   set('discovery', paired ? 'Bonjour 发现已开启' : 'Bonjour 配对发现未开启');
+   set('discovery', paired ? '配对窗口已开启 · 手动 IP：' + (s.tunnel_ip || s.lan_ip || '未知') + ' · 配对端口：' + s.pairing_port : '配对窗口未开启');
    nodes.discovery.className = 'as-discovery' + (paired ? ' is-active' : '');
    set('code', paired ? paired.code : '— — — — — —');
-   set('countdown', paired ? Math.max(0, Math.ceil((paired.expires_at - Date.now()) / 1000)) + ' 秒后失效，发现服务将自动关闭' : online ? '获取配对码时，同步开启 120 秒 Bonjour 发现。' : '请先启动服务，再获取配对码。');
+   set('countdown', paired ? Math.max(0, Math.ceil((paired.expires_at - Date.now()) / 1000)) + ' 秒后失效，可通过局域网自动发现或私网 IP 配对' : online ? '获取配对码时，同步开启 120 秒 Bonjour 发现。' : '请先启动服务，再获取配对码。');
    nodes.code.className = 'as-code' + (paired ? ' is-active' : '');
    syncCalls(s);
    root && root.setAttribute('aria-busy', pending ? 'true' : 'false');
@@ -129,7 +129,7 @@ return view.extend({
     } else {
      var updated = await getStatus(); refresh(updated);
      if (action === 'pair_start') {
-      if (!updated.pairing || !updated.bonjour_pairing) throw new Error('未确认配对发现已开启，请重试。');
+      if (!updated.pairing) throw new Error('未确认配对窗口已开启，请重试。');
       message('success', '配对码已就绪，Bonjour 发现已开启', '在同一局域网的 AirSIM 中添加设备，选择 AirSIM-MU300 并输入配对码。');
      } else if (action === 'pair_cancel') {
       if (updated.pairing) throw new Error('配对窗口仍在运行，请重试。');

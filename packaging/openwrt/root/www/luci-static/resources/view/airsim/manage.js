@@ -15,6 +15,7 @@ var releasesURL = 'https://github.com/kai-wu-cortex/airsim-mu300/releases';
 
 function validateSettings(s) {
  if (s.mode !== 'local' && s.mode !== 'cloud') return '请选择连接模式。';
+ if (s.tunnel_interface && (!/^[a-zA-Z0-9_.-]{1,15}$/.test(s.tunnel_interface) || s.tunnel_interface === s.interface || s.tunnel_interface === 'lo')) return 'Tailscale 接口名称无效或与 LAN 重复。';
  if (!/^[a-zA-Z0-9_.-]{1,15}$/.test(s.interface)) return 'LAN 接口名称无效。';
  var used = [7580,7581,8575,8576];
  for (var port of [s.pair_port,s.control_port,s.pcm_port]) {
@@ -73,14 +74,14 @@ return view.extend({
    // Never replace editable fields during polling: an unfinished draft is local.
   }
   function input(key, label, type, help) {
-   fields[key] = E('input', {id:'as-setting-'+key,type:type||'text','class':'as-dial-input',value:String(settings[key]),autocomplete:'off',maxlength:key==='relay_url'?512:32});
+   fields[key] = E('input', {id:'as-setting-'+key,type:type||'text','class':'as-dial-input',value:String(settings[key] == null ? "" : settings[key]),autocomplete:'off',maxlength:key==='relay_url'?512:32});
    return E('div', {'class':'as-setting'}, [E('label', {'for':'as-setting-'+key,'class':'as-field-label'}, label),fields[key],E('p', {'class':'as-caption'},help||'')]);
   }
   fields.mode = E('select',{id:'as-setting-mode','class':'as-call-select'},[
    E('option',{value:'local'},'仅局域网'),E('option',{value:'cloud'},'云端 + 局域网')
   ]); fields.mode.value = settings.mode;
   function values() {
-   return {mode:fields.mode.value,relay_url:fields.relay_url.value.trim().replace(/\/+$/,''),interface:fields.interface.value.trim(),pair_port:Number(fields.pair_port.value),control_port:Number(fields.control_port.value),pcm_port:Number(fields.pcm_port.value)};
+   return {mode:fields.mode.value,relay_url:fields.relay_url.value.trim().replace(/\/+$/,''),interface:fields.interface.value.trim(),tunnel_interface:fields.tunnel_interface.value.trim(),pair_port:Number(fields.pair_port.value),control_port:Number(fields.control_port.value),pcm_port:Number(fields.pcm_port.value)};
   }
   async function save() {
    if (pending) return;
@@ -184,6 +185,7 @@ return view.extend({
      E('label',{'for':'as-setting-mode','class':'as-field-label'},'连接模式'),fields.mode,
      E('p',{'class':'as-caption'},'局域网模式禁用 Relay 注册、心跳和云端命令；云端模式保留局域网通路，但仍须有效的客户端云端配对。'),
      input('relay_url','Relay HTTPS 地址','url','留空跟随客户端配对地址。更换地址不会转移旧凭据；需在客户端配置相同地址并重新配对。'),
+     input('tunnel_interface','Tailscale 接口（可选）','text','留空关闭；通常为 tailscale0。先连接 Tailscale，两端允许配对、控制和 PCM 端口。保存后启动服务生效。'),
      input('interface','可信 LAN 接口','text','通常为 br-lan。仅绑定该接口的私有 IPv4；不修改路由、防火墙或设备网络。'),
      E('div',{'class':'as-port-fields'},[input('pair_port','配对端口','number'),input('control_port','控制端口','number'),input('pcm_port','PCM 端口','number')]),
      E('p',{'class':'as-caption'},'先在概览页关闭服务，再保存并手动启动。端口变化会通过 Bonjour 公布；客户端需重新发现，必要时重新配对。内部端口保持仅回环访问。'),

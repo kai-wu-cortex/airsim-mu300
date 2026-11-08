@@ -1,8 +1,8 @@
-# AirSIM for MU300 一体部署手册（R22）
+# AirSIM for MU300 一体部署手册（R23 开发预览）
 
-> R22 接入云端早期语音 v1 显式协商；VoWLAN 和 8 kHz 音频格式保持不变。用户已反馈当前通话体验验收通过，R22 完整包及新协商路径未单独实机验证。见 [发布说明](RELEASE_v0.1.0-r22.md)。
+> R23 新增 Tailscale 手动配对和云端接收缓冲，自动化测试已通过，新功能和完整 APK 尚未实机验收。详见 [R23 说明](RELEASE_v0.1.0-r23.md)、[Tailscale 步骤](TAILSCALE_PAIRING.md) 和 [缓冲设置](CLOUD_AUDIO_BUFFER.md)。
 
-> **客户端兼容：** 云端接通前公告需要发送 `early_media_version: 1` 并识别 `early_media_ready_v1` 的新版 AirSIM。未协商的旧客户端只等待正常接通后双向音频；请先更新客户端。R22 是新版本号，R21 用户可检查更新或使用下方安装脚本升级。
+> **客户端兼容：** 云端接通前公告需要发送 `early_media_version: 1` 并识别 `early_media_ready_v1` 的新版 AirSIM。未协商的旧客户端只等待正常接通后双向音频；请先更新客户端。R23 是开发预览版，开启预览频道后 R22 用户可检查更新或使用下方安装脚本升级。
 
 > [!WARNING]
 > 当前一体包只覆盖已验证 U30 Air 的 `5.4.254-gb50db5b6224c` 内核及配置 `1057cb97e0d2d7f26816e8bf7841faac1153833a01d4893cdc196b75ae6356b3`。F50 / 7.2.8 不在适用范围。R17 在 U30 Air 上的升级、重启自动准备及两通双向通话验收已通过，长通话仍未完整验收。
@@ -15,7 +15,7 @@
 
 ## 一次安装
 
-本手册安装 R22 正式版。原通话确认结束后，可用新操作立即拨打同一号码，同一操作 ID 重试不会再次拨出；仍需满足实际通话空闲条件，见 [说明](R18_REDIAL.md)。发布边界见 [R22 说明](RELEASE_v0.1.0-r22.md)。
+本手册安装 R23 开发预览版。原通话确认结束后，可用新操作立即拨打同一号码，同一操作 ID 重试不会再次拨出；仍需满足实际通话空闲条件，见 [说明](R18_REDIAL.md)。发布边界见 [R23 说明](RELEASE_v0.1.0-r23.md)。
 
 先结束通话及短信任务，保存已有配置和可信回退包。软件包是 OpenWrt APK v3，不是 Android APK。
 
@@ -23,7 +23,7 @@
 
 ```sh
 cd /tmp
-wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r22/install.sh
+wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r23/install.sh
 cat airsim-install.sh
 sh airsim-install.sh --check
 sh airsim-install.sh --install
@@ -33,7 +33,7 @@ sh airsim-install.sh --install
 
 ## LuCI 手动上传
 
-从同一 Release 获取 `luci-app-airsim-0.1.0-r22.apk`、`airsim-dev.pem` 和校验清单。核对公钥 SHA-256 `0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de` 并导入公钥，验证 APK 后上传安装，不忽略签名或依赖。APK 钩子会执行同样的音频准备检查；必须以安装结果和 LuCI 准备状态判断是否完成，不能只看软件包出现在列表中。
+从同一 Release 获取 `luci-app-airsim-0.1.0-r23.apk`、`airsim-dev.pem` 和校验清单。核对公钥 SHA-256 `0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de` 并导入公钥，验证 APK 后上传安装，不忽略签名或依赖。APK 钩子会执行同样的音频准备检查；必须以安装结果和 LuCI 准备状态判断是否完成，不能只看软件包出现在列表中。
 
 ## 看安装结果
 
@@ -51,6 +51,12 @@ sh airsim-install.sh --install
 
 保持 iPhone 所需的云模式或本地模式，在 LuCI → 服务 → AirSIM 获取新验证码后配对。再次配对时重新获取验证码；不需要为了绕过兼容问题切换到本地模式。配对成功与云推送是否就绪是不同状态，云端设置和权限不会被配对操作强行开启。原有配对记录保留；仍有 16 个客户端名额上限，本版不自动清除历史记录。
 
+## Tailscale 与云端缓冲
+
+Tailscale 手动 IP 配对：先让设备和 iPhone 加入允许互访的网络；空闲时关闭插件，在管理页填写 `tailscale0`，保存并启动；获取六位码后，在 iPhone 的「私网 IP」入口输入 U30 的 Tailscale IPv4 和配对端口。默认需允许 TCP 8580、8581、8582。只支持 Linux 原生 TUN IPv4，不支持 userspace 代理或 MagicDNS；本地配对保留原 Relay 配置。
+
+云端缓冲在新版 iPhone AirSIM 中选择，下一通生效；建议先从自动开始。稳定优先和手动档位以增加等待换取对短暂网络空档的容忍，不能修复持续断网。旧客户端继续沿用 U30 原自动策略，不影响正常接通后的通话。
+
 ## AirSIM 短信
 
 R19 包含收件箱同步、保存确认与发送，每条最多 70 字，不支持 emoji 或长短信拆分。配对后会同步原生收件箱；仅用户主动发送时提交短信，不自动发送测试消息。真实收发、后台推送及云端路径尚未验收，详见 [短信说明](AIRSIM_SMS.md)。
@@ -67,5 +73,7 @@ U30 Air 通过原有认证健康响应和心跳上报电量，AirSIM 已有兼�
 - [R12 旧发布说明](RELEASE_v0.1.0-r12.md)
 
 ## 回退
+
+回退到 R22 或更早版本前，先关闭插件、清空 Tailscale 接口并保存，避免旧版拒绝新增配置字段。
 
 结束通话后使用与原设备兼容的可信包恢复插件，保留配对和配置。首次音频安装会保存原脚本、链接与启动项；音频回退按 [恢复指南](../packaging/openwrt-audio/README.md) 执行，已加载模块需安排重启才会改变。不要跨内核强行安装旧包。

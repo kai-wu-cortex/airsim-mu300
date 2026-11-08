@@ -24,7 +24,7 @@
   packaged under `/usr/share/doc/airsim/dependency-licenses/`; corresponding
   vendored source is in the release source bundle. They retain their licenses.
 
-R22 retains the fixed offline DSP firmware backup from the public
+R23 retains the fixed offline DSP firmware backup from the public
 `dikeckaan/mu300-audio-firmware` commit
 `8a3fbd2cd0556796d0ffef5be05b4c21a743f868`, not from a user's device.
 SHA-256: `378ceea78dbf013e10625e71efd6fab487d727e371884ae8daf078da2828b937`.

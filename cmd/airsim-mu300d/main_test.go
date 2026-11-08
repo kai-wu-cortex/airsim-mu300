@@ -50,10 +50,10 @@ func TestDirectClaimRefusedBeforeConsumingSession(t *testing.T) {
 	d := &daemon{session: s}
 	w := httptest.NewRecorder()
 	d.claim(w, httptest.NewRequest("POST", "/pair/v1/claim", strings.NewReader(`{"want_direct_route":true}`)))
-	if w.Code != 409 {
+	if w.Code != 503 {
 		t.Fatalf("%d", w.Code)
 	}
 	if d.session != s {
-		t.Fatal("unimplemented route destroyed pairing")
+		t.Fatal("unavailable route destroyed pairing")
 	}
 }

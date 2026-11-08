@@ -75,3 +75,11 @@ test('automatic check preferences persist without installing; status polling nev
  await automatic.attrs.change();assert.deepEqual(t.requests,[{method:'updates_policy',args:[JSON.stringify({automatic:false,previews:true})]}]);
  await t.poll();assert.equal(t.requests.length,1);
 });
+
+test('optional Tailscale interface is empty for old settings and validated before save',async()=>{
+ const t=setup();assert.equal(t.field('tunnel_interface').value,'');
+ t.field('tunnel_interface').value='br-lan';await t.button('保存设置').attrs.click();assert.equal(t.requests.length,0);
+ t.field('tunnel_interface').value='tailscale0;reboot';await t.button('保存设置').attrs.click();assert.equal(t.requests.length,0);
+ t.field('tunnel_interface').value='tailscale0';await t.button('保存设置').attrs.click();assert.equal(t.requests.length,1);
+ assert.equal(JSON.parse(t.requests[0].args[0]).tunnel_interface,'tailscale0');
+});

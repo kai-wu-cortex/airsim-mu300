@@ -42,6 +42,8 @@ type daemon struct {
 	callMu        sync.Mutex
 	gateway       *gateway.Gateway
 	settings      managementSettings
+	directHosts   map[string]bool
+	tunnel        string
 }
 
 func main() {
@@ -150,24 +152,10 @@ func main() {
 	gwAd, e := zeroconf.Register("AirSIM-MU300-"+id[len(id)-8:], "_airsim-vowlan._tcp", "local.", settings.ControlPort,
 		[]string{"v=1", "agent_id=" + id, "agent_kind=mu300", "device_name=AirSIM MU300", "manufacturer=ZTE", "model=MU300", "host=" + lan, "control_port=" + portText(settings.ControlPort), "pcm_port=" + portText(settings.PCMPort), "caps=control,pcm"}, []net.Interface{*lanInterface})
 	if e != nil {
-		log.Fatal(e)
+		log.Print("Bonjour unavailable; manual IP pairing remains available")
+	} else {
+		defer gwAd.Shutdown()
 	}
-	defer gwAd.Shutdown()
-	pcmListener, e := net.Listen("tcp", net.JoinHostPort(lan, portText(settings.PCMPort)))
-	if e != nil {
-		log.Fatal(e)
-	}
-	defer pcmListener.Close()
-	go func() { <-ctx.Done(); pcmListener.Close() }()
-	go func() {
-		for {
-			c, err := pcmListener.Accept()
-			if err != nil {
-				return
-			}
-			go d.gateway.ServePCM(ctx, c)
-		}
-	}()
 	listener, e := net.Listen("tcp", "127.0.0.1:7580")
 	if e != nil {
 		log.Fatal(e)
@@ -198,15 +186,52 @@ func main() {
 	public := http.NewServeMux()
 	public.HandleFunc("/pair/v1/info", d.pairInfo)
 	public.HandleFunc("/pair/v1/claim", d.claim)
-	servers := []*http.Server{{Addr: "127.0.0.1:7581", Handler: admin, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 45 * time.Second, MaxHeaderBytes: 8192}, {Addr: net.JoinHostPort(lan, portText(settings.PairPort)), Handler: public, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, MaxHeaderBytes: 8192}}
-	servers = append(servers, &http.Server{Addr: net.JoinHostPort(lan, portText(settings.ControlPort)), Handler: d.gateway, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 80 * time.Second, MaxHeaderBytes: 8192})
-	for _, server := range servers {
-		go func(s *http.Server) {
-			if e := s.ListenAndServe(); e != nil && !errors.Is(e, http.ErrServerClosed) {
-				log.Printf("listener failed: %s", s.Addr)
+	hosts, e := directAddresses(settings)
+	if e != nil {
+		log.Fatal(e)
+	}
+	if len(hosts) > 1 {
+		d.tunnel = hosts[1]
+	}
+	listeners, e := bindDirectListeners(hosts, settings)
+	if e != nil {
+		log.Fatal(e)
+	}
+	defer listeners.close()
+	d.directHosts = make(map[string]bool)
+	for _, host := range hosts {
+		d.directHosts[host] = true
+	}
+	servers := []*http.Server{{Addr: "127.0.0.1:7581", Handler: admin, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 45 * time.Second, MaxHeaderBytes: 8192}}
+	adminServer := servers[0]
+	go func() {
+		if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			cancel()
+		}
+	}()
+	for _, endpoint := range listeners.endpoints {
+		pairServer := &http.Server{Handler: privatePairing(public), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, MaxHeaderBytes: 8192}
+		controlServer := &http.Server{Handler: d.gateway, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 80 * time.Second, MaxHeaderBytes: 8192}
+		servers = append(servers, pairServer, controlServer)
+		go func() {
+			if err := pairServer.Serve(endpoint.pair); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				cancel()
 			}
-		}(server)
+		}()
+		go func() {
+			if err := controlServer.Serve(endpoint.control); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				cancel()
+			}
+		}()
+		go func(l net.Listener) {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go d.gateway.ServePCM(ctx, c)
+			}
+		}(endpoint.pcm)
 	}
 	log.Printf("MU300 plugin ready; pairing port %d", settings.PairPort)
 	<-ctx.Done()
@@ -215,7 +240,7 @@ func main() {
 		s.Close()
 	}
 	listener.Close()
-	pcmListener.Close()
+	listeners.close()
 	d.gateway.Shutdown()
 	<-acceptedDone
 	sessions.Wait()
@@ -276,8 +301,11 @@ func (d *daemon) status(w http.ResponseWriter, r *http.Request) {
 	}
 	paired := d.paired
 	d.mu.Unlock()
+	d.adMu.Lock()
+	bonjour := d.advertisement != nil
+	d.adMu.Unlock()
 	calls := d.callsSnapshot(r.Context())
-	write(w, 200, map[string]any{"product": "AirSIM for MU300", "version": version, "running": true, "lan_ip": d.lan, "pairing_port": d.settings.PairPort, "control_port": d.settings.ControlPort, "pcm_port": d.settings.PCMPort, "mode": d.settings.Mode, "bonjour_pairing": session != nil, "agent_id": d.deviceID, "pairing": session, "paired_this_boot": paired, "audio": d.bridge.Status(), "gateway": d.gateway.Diagnostics(), "devices": dev, "audio_available": e == nil, "agent": d.agentHealth(), "sim": d.agentGet("/api/status"), "relay": d.agentGet("/api/push/status"), "call_active": !calls.Available || len(calls.Calls) > 0, "calls": calls})
+	write(w, 200, map[string]any{"product": "AirSIM for MU300", "version": version, "running": true, "lan_ip": d.lan, "tunnel_ip": d.tunnel, "pairing_port": d.settings.PairPort, "control_port": d.settings.ControlPort, "pcm_port": d.settings.PCMPort, "mode": d.settings.Mode, "bonjour_pairing": session != nil && bonjour, "agent_id": d.deviceID, "pairing": session, "paired_this_boot": paired, "audio": d.bridge.Status(), "gateway": d.gateway.Diagnostics(), "devices": dev, "audio_available": e == nil, "agent": d.agentHealth(), "sim": d.agentGet("/api/status"), "relay": d.agentGet("/api/push/status"), "call_active": !calls.Available || len(calls.Calls) > 0, "calls": calls})
 }
 
 func (d *daemon) callActive() bool {
@@ -358,19 +386,13 @@ func (d *daemon) startPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.adMu.Lock()
-	i, err := net.InterfaceByName(d.ifname)
-	if err != nil {
-		d.adMu.Unlock()
-		write(w, 503, map[string]string{"error": "LAN unavailable"})
-		return
+	var ad *zeroconf.Server
+	if i, err := net.InterfaceByName(d.ifname); err == nil {
+		ad, _ = zeroconf.RegisterProxy("AirSIM-MU300-"+s.ID[:8], "_airsim-pair._tcp", "local.", d.settings.PairPort, "airsim-"+s.ID[:8], []string{d.lan}, []string{"v=1", "session=" + s.ID, "key=" + s.Public, fmt.Sprintf("expires=%d", s.Expires)}, []net.Interface{*i})
+		if ad != nil {
+			ad.TTL(30)
+		}
 	}
-	ad, err := zeroconf.RegisterProxy("AirSIM-MU300-"+s.ID[:8], "_airsim-pair._tcp", "local.", d.settings.PairPort, "airsim-"+s.ID[:8], []string{d.lan}, []string{"v=1", "session=" + s.ID, "key=" + s.Public, fmt.Sprintf("expires=%d", s.Expires)}, []net.Interface{*i})
-	if err != nil {
-		d.adMu.Unlock()
-		write(w, 503, map[string]string{"error": "pairing discovery unavailable"})
-		return
-	}
-	ad.TTL(30)
 	if d.advertisement != nil {
 		d.advertisement.Shutdown()
 	}
@@ -437,8 +459,8 @@ func (d *daemon) claim(w http.ResponseWriter, r *http.Request) {
 		write(w, 400, map[string]string{"error": "invalid_claim"})
 		return
 	}
-	if claim.WantDirect {
-		write(w, 409, map[string]string{"error": "Manual-IP pairing is not available in this preview; use Bonjour automatic discovery"})
+	if claim.WantDirect && !d.hasDirectRoute(r) {
+		write(w, 503, map[string]string{"error": "direct_gateway_unavailable"})
 		return
 	}
 	plaintext, e := s.Open(claim, time.Now())
@@ -457,30 +479,41 @@ func (d *daemon) claim(w http.ResponseWriter, r *http.Request) {
 		write(w, 500, map[string]string{"error": "gateway_key_storage_failed"})
 		return
 	}
-	prepareRegistration(reg, d.deviceID)
-	body, _ := json.Marshal(reg)
-	defer clear(body)
-	req, _ := http.NewRequestWithContext(r.Context(), "POST", "http://127.0.0.1:8575/api/push/register", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, e := d.client.Do(req)
-	if e != nil {
-		write(w, 502, map[string]string{"error": "agent_unavailable"})
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		write(w, 502, map[string]string{"error": "agent_registration_rejected"})
-		return
-	}
-	var result map[string]any
-	if json.NewDecoder(io.LimitReader(resp.Body, 32768)).Decode(&result) != nil {
-		write(w, 502, map[string]string{"error": "invalid_agent_response"})
-		return
-	}
-	pushConfigured, ok := result["configured"].(bool)
-	if !ok {
-		write(w, 502, map[string]string{"error": "invalid_agent_response"})
-		return
+	result := map[string]any{"configured": true, "local_mode": true}
+	pushConfigured := false
+	localMode, _ := reg["local_mode"].(bool)
+	if localMode {
+		if enabled, _ := reg["cloud_enabled"].(bool); enabled {
+			write(w, 400, map[string]string{"error": "local_mode_cloud_conflict"})
+			return
+		}
+	} else {
+		result = nil
+		prepareRegistration(reg, d.deviceID)
+		body, _ := json.Marshal(reg)
+		defer clear(body)
+		req, _ := http.NewRequestWithContext(r.Context(), "POST", "http://127.0.0.1:8575/api/push/register", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, e := d.client.Do(req)
+		if e != nil {
+			write(w, 502, map[string]string{"error": "agent_unavailable"})
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			write(w, 502, map[string]string{"error": "agent_registration_rejected"})
+			return
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 32768)).Decode(&result) != nil {
+			write(w, 502, map[string]string{"error": "invalid_agent_response"})
+			return
+		}
+		var ok bool
+		pushConfigured, ok = result["configured"].(bool)
+		if !ok {
+			write(w, 502, map[string]string{"error": "invalid_agent_response"})
+			return
+		}
 	}
 	if d.gateway.Add(localSecret) != nil {
 		write(w, 500, map[string]string{"error": "gateway_key_storage_failed"})
@@ -494,6 +527,13 @@ func (d *daemon) claim(w http.ResponseWriter, r *http.Request) {
 	result["push_configured"] = pushConfigured
 	result["configured"] = true
 	result["agent_id"] = d.deviceID
+	if claim.WantDirect {
+		key, _ := base64.RawURLEncoding.DecodeString(localSecret)
+		result["control_port"] = d.settings.ControlPort
+		result["pcm_port"] = d.settings.PCMPort
+		result["route_proof"] = gateway.Sign(key, fmt.Sprintf("AIRSIM-DIRECT1\n%s\n%s\n%s\n%d\n%d", s.ID, claim.ClientPublic, d.deviceID, d.settings.ControlPort, d.settings.PCMPort))
+		clear(key)
+	}
 	d.mu.Lock()
 	d.paired = true
 	d.mu.Unlock()

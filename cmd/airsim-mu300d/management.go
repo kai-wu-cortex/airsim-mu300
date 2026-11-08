@@ -24,12 +24,13 @@ import (
 )
 
 type managementSettings struct {
-	Mode        string `json:"mode"`
-	RelayURL    string `json:"relay_url"`
-	Interface   string `json:"interface"`
-	PairPort    int    `json:"pair_port"`
-	ControlPort int    `json:"control_port"`
-	PCMPort     int    `json:"pcm_port"`
+	Mode            string `json:"mode"`
+	RelayURL        string `json:"relay_url"`
+	Interface       string `json:"interface"`
+	TunnelInterface string `json:"tunnel_interface,omitempty"`
+	PairPort        int    `json:"pair_port"`
+	ControlPort     int    `json:"control_port"`
+	PCMPort         int    `json:"pcm_port"`
 }
 
 func defaultSettings() managementSettings {
@@ -44,6 +45,9 @@ func (s managementSettings) validate() error {
 	}
 	if !interfacePattern.MatchString(s.Interface) {
 		return errors.New("LAN 接口名称无效")
+	}
+	if s.TunnelInterface != "" && (!interfacePattern.MatchString(s.TunnelInterface) || s.TunnelInterface == s.Interface || s.TunnelInterface == "lo") {
+		return errors.New("Tailscale 接口名称无效或与 LAN 重复")
 	}
 	seen := map[int]bool{7580: true, 7581: true, 8575: true, 8576: true}
 	for _, port := range []int{s.PairPort, s.ControlPort, s.PCMPort} {
@@ -134,24 +138,15 @@ func saveSettings(data string, s managementSettings) error {
 	if legacyServiceListening() {
 		return errors.New("检测到运行中的 Agent，请先关闭服务")
 	}
-	if _, e := lanAddress(s.Interface); e != nil {
-		return errors.New("所选 LAN 接口没有私有 IPv4 地址；不会更改设备网络")
+	hosts, e := directAddresses(s)
+	if e != nil {
+		return e
 	}
-	// Check availability without changing firewall rules or other services.
-	var listeners []net.Listener
-	defer func() {
-		for _, l := range listeners {
-			l.Close()
-		}
-	}()
-	ip, _ := lanAddress(s.Interface)
-	for _, port := range []int{s.PairPort, s.ControlPort, s.PCMPort} {
-		l, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
-		if err != nil {
-			return errors.New("所选端口已占用或不可用，请选择其他端口")
-		}
-		listeners = append(listeners, l)
+	listeners, e := bindDirectListeners(hosts, s)
+	if e != nil {
+		return errors.New("所选端口已占用或不可用")
 	}
+	defer listeners.close()
 	return writeSettingsFile(data, s)
 }
 

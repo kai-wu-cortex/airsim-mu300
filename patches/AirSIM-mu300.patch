@@ -202,19 +202,368 @@ index e2142ad..0ae7edf 100644
  			CellularRegistration: registration, CellularRecovery: recovery,
  			ECMCarrier: readDebugFile(usbCarrierPath), SignalDBM: signal,
  		})
+diff --git a/module/module-agent/cloud_audio_policy.go b/module/module-agent/cloud_audio_policy.go
+new file mode 100644
+index 0000000..d2b2351
+--- /dev/null
++++ b/module/module-agent/cloud_audio_policy.go
+@@ -0,0 +1,81 @@
++package main
++
++import (
++	"encoding/json"
++	"strings"
++	"sync"
++	"time"
++)
++
++// The negotiated cloud format remains S16LE, 8 kHz, mono, 20 ms.
++// Frame counts are derived from duration; physical 48/16 kHz ALSA formats
++// are resampled by the bridge and do not enter this queue.
++const cloudAudioFrameDuration = 20 * time.Millisecond
++
++type cloudAudioBufferPolicy struct {
++	minimum, maximum, capacity int
++	mode                       string
++}
++
++func automaticCloudAudioPolicy() cloudAudioBufferPolicy {
++	// Preserve the existing U30 automatic policy, not Android's different default.
++	return cloudAudioBufferPolicy{10, 30, 50, "automatic"}
++}
++func cloudAudioPolicy(c cloudCallAction) cloudAudioBufferPolicy {
++	fallback := automaticCloudAudioPolicy()
++	var version, millis int
++	var mode string
++	if json.Unmarshal(c.AudioBufferVersion, &version) != nil || version != 1 || json.Unmarshal(c.AudioBufferMode, &mode) != nil {
++		return fallback
++	}
++	if len(c.AudioBufferMS) > 0 && (string(c.AudioBufferMS) == "null" || json.Unmarshal(c.AudioBufferMS, &millis) != nil) {
++		return fallback
++	}
++	frames := func(ms int) int { return int(time.Duration(ms) * time.Millisecond / cloudAudioFrameDuration) }
++	switch mode {
++	case "stable":
++		return cloudAudioBufferPolicy{frames(240), frames(720), frames(760), mode}
++	case "manual":
++		if millis == 240 || millis == 480 || millis == 720 || millis == 960 {
++			n := frames(millis)
++			return cloudAudioBufferPolicy{n, n, n + frames(40), mode}
++		}
++	}
++	return fallback
++}
++func sameCloudAudioIdentity(a, b cloudCallDescriptor) bool {
++	return a.CallID == b.CallID && a.CallUUID != "" && strings.EqualFold(a.CallUUID, b.CallUUID) && a.Generation > 0 && a.Generation == b.Generation
++}
++
++// Owned by one call identity, retained across WebSocket reconnects, never global.
++// Media samples are owned by each bridge and are deliberately NOT retained.
++type cloudAudioBufferSnapshot struct {
++	mu       sync.Mutex
++	selected bool
++	policy   cloudAudioBufferPolicy
++}
++
++func (s *cloudAudioBufferSnapshot) accept(c cloudCallAction) cloudAudioBufferPolicy {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if c.Action != "answer" {
++		return automaticCloudAudioPolicy()
++	}
++	if !s.selected {
++		s.policy = automaticCloudAudioPolicy()
++		if c.AudioBufferIdentity {
++			s.policy = cloudAudioPolicy(c)
++		}
++		s.selected = true
++	}
++	return s.policy
++}
++func (b *cloudPCMBridge) configureAudioBuffer(policy cloudAudioBufferPolicy) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if b.closed || b.conn != nil {
++		return
++	}
++	b.bufferPolicy = policy
++	b.uplinkBuffer = cloudPCMSpeechBuffer{policy: policy}
++}
+diff --git a/module/module-agent/cloud_audio_policy_test.go b/module/module-agent/cloud_audio_policy_test.go
+new file mode 100644
+index 0000000..9372fcc
+--- /dev/null
++++ b/module/module-agent/cloud_audio_policy_test.go
+@@ -0,0 +1,255 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net"
++	"testing"
++	"time"
++)
++
++func bufferAction(t *testing.T, extra string) cloudCallAction {
++	t.Helper()
++	raw := `{"action":"answer","call_id":"call","call_uuid":"uuid","generation":7,"owner":"iphone"` + extra + `}`
++	c, err := decodeCloudCallActionForDescriptor([]byte(raw), cloudCallDescriptor{CallID: "call", CallUUID: "uuid", Generation: 7, Direction: "outgoing"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return c
++}
++func TestCloudAudioPolicyWireFallbacks(t *testing.T) {
++	for _, extra := range []string{"", `,"audio_buffer_version":2,"audio_buffer_mode":"manual","audio_buffer_ms":720`, `,"audio_buffer_version":"1","audio_buffer_mode":"manual","audio_buffer_ms":720`, `,"audio_buffer_version":1,"audio_buffer_mode":{},"audio_buffer_ms":720`, `,"audio_buffer_version":1,"audio_buffer_mode":"other"`, `,"audio_buffer_version":1,"audio_buffer_mode":"manual","audio_buffer_ms":719`, `,"audio_buffer_version":1,"audio_buffer_mode":"manual","audio_buffer_ms":720.5`, `,"audio_buffer_version":1,"audio_buffer_mode":"manual","audio_buffer_ms":"720"`, `,"audio_buffer_version":1,"audio_buffer_mode":"stable","audio_buffer_ms":null`, `,"audio_buffer_version":1,"audio_buffer_mode":"automatic"`} {
++		c := bufferAction(t, extra)
++		if got := cloudAudioPolicy(c); got != automaticCloudAudioPolicy() {
++			t.Fatal(extra, got)
++		}
++	}
++	for _, ms := range []int{240, 480, 720, 960} {
++		c := bufferAction(t, `,"audio_buffer_version":1,"audio_buffer_mode":"manual"`)
++		c.AudioBufferMS, _ = json.Marshal(ms)
++		p := cloudAudioPolicy(c)
++		if p.minimum != ms/20 || p.maximum != ms/20 || p.capacity != ms/20+2 {
++			t.Fatal(p)
++		}
++	}
++}
++func manual720() cloudAudioBufferPolicy { return cloudAudioBufferPolicy{36, 36, 38, "manual"} }
++func TestManual720ReserveGapCapAndReprime(t *testing.T) {
++	b := cloudPCMSpeechBuffer{policy: manual720()}
++	now := time.Now()
++	for i := 0; i < 36; i++ {
++		b.enqueue(bytes.Repeat([]byte{byte(i)}, cloudPCMFrameBytes), now.Add(time.Duration(i)*cloudAudioFrameDuration))
++		if i < 35 && b.pop() != nil {
++			t.Fatal("premature playout")
++		}
++	}
++	// A 400ms network gap consumes twenty frames from the reserve, not silence.
++	for i := 0; i < 36; i++ {
++		if f := b.pop(); len(f) != cloudPCMFrameBytes || f[0] != byte(i) {
++			t.Fatal("gap changed speech", i)
++		}
++	}
++	if b.pop() != nil || b.target != 36 || b.primed {
++		t.Fatal("manual target changed on exhaustion")
++	}
++	for i := 0; i < 35; i++ {
++		b.enqueue(make([]byte, cloudPCMFrameBytes), now)
++	}
++	if b.pop() != nil {
++		t.Fatal("did not rebuffer")
++	}
++	for i := 0; i < 80; i++ {
++		b.enqueue(bytes.Repeat([]byte{byte(i)}, cloudPCMFrameBytes), now)
++	}
++	if len(b.frames) != 38 || b.dropped != 77 || b.target != 36 {
++		t.Fatal("unbounded manual backlog", len(b.frames), b.dropped)
++	}
++	if b.pop()[0] != 42 {
++		t.Fatal("did not keep newest bounded speech")
++	}
++}
++func TestStableTargetRisesThenReturnsToFloor(t *testing.T) {
++	c := bufferAction(t, `,"audio_buffer_version":1,"audio_buffer_mode":"stable"`)
++	b := cloudPCMSpeechBuffer{policy: cloudAudioPolicy(c)}
++	now := time.Now()
++	for i := 0; i < 12; i++ {
++		b.enqueue(make([]byte, cloudPCMFrameBytes), now.Add(time.Duration(i)*cloudAudioFrameDuration))
++	}
++	for b.pop() != nil {
++	}
++	if b.target != 13 {
++		t.Fatal("underrun did not increase stable target", b.target)
++	}
++	now = now.Add(12 * cloudAudioFrameDuration)
++	for i := 0; i < 400; i++ {
++		b.enqueue(make([]byte, cloudPCMFrameBytes), now.Add(time.Duration(i)*cloudAudioFrameDuration))
++		b.pop()
++	}
++	if b.target != 12 {
++		t.Fatal("stable target failed to fall", b.target)
++	}
++	b.enqueue(make([]byte, cloudPCMFrameBytes), now.Add(time.Hour))
++	if b.target != 36 {
++		t.Fatal("stable maximum", b.target)
++	}
++	for i := 0; i < 100; i++ {
++		b.enqueue(make([]byte, cloudPCMFrameBytes), now)
++	}
++	if len(b.frames) > 38 {
++		t.Fatal("stable hard limit")
++	}
++}
++func TestAudioSnapshotIdentityAndLifetime(t *testing.T) {
++	c := bufferAction(t, `,"audio_buffer_version":1,"audio_buffer_mode":"manual","audio_buffer_ms":720`)
++	s := &cloudAudioBufferSnapshot{}
++	p := s.accept(c)
++	if p != manual720() {
++		t.Fatal(p)
++	}
++	c.AudioBufferMS = json.RawMessage(`240`)
++	if s.accept(c) != p {
++		t.Fatal("duplicate answer replaced snapshot")
++	}
++	fresh := &cloudAudioBufferSnapshot{}
++	if fresh.accept(c).minimum != 12 {
++		t.Fatal("new call kept old snapshot")
++	}
++	c.AudioBufferIdentity = false
++	if (&cloudAudioBufferSnapshot{}).accept(c) != automaticCloudAudioPolicy() {
++		t.Fatal("incomplete identity accepted custom policy")
++	}
++	for _, raw := range []string{`{"action":"answer","call_id":"other","call_uuid":"uuid","generation":7}`, `{"action":"answer","call_id":"call","call_uuid":"other","generation":7}`, `{"action":"answer","call_id":"call","call_uuid":"uuid","generation":8}`} {
++		if _, err := decodeCloudCallActionForDescriptor([]byte(raw), cloudCallDescriptor{CallID: "call", CallUUID: "uuid", Generation: 7}); err == nil {
++			t.Fatal("foreign identity accepted")
++		}
++	}
++	for _, raw := range []string{`{"action":"answer","call_id":"call","generation":7}`, `{"action":"answer","call_id":"call","call_uuid":"uuid"}`} {
++		c, err := decodeCloudCallActionForDescriptor([]byte(raw), cloudCallDescriptor{CallID: "call", CallUUID: "uuid", Generation: 7})
++		if err != nil || c.AudioBufferIdentity {
++			t.Fatal("legacy defaults granted negotiation")
++		}
++	}
++}
++func TestManualPCMWorkerAndEarlyTransition(t *testing.T) {
++	b := &cloudPCMBridge{}
++	b.configureAudioBuffer(manual720())
++	if b.write(make([]byte, cloudPCMFrameBytes)) == nil || len(b.uplinkBuffer.frames) != 0 {
++		t.Fatal("early media retained uplink")
++	}
++	sender, receiver := net.Pipe()
++	defer receiver.Close()
++	b.set(sender)
++	defer b.close()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { b.playUplink(ctx); close(done) }()
++	for i := 0; i < 35; i++ {
++		if err := b.write(bytes.Repeat([]byte{1}, cloudPCMFrameBytes)); err != nil {
++			t.Fatal(err)
++		}
++	}
++	receiver.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
++	buf := make([]byte, cloudPCMFrameBytes)
++	if _, err := receiver.Read(buf); err == nil {
++		t.Fatal("worker played below720ms reserve")
++	}
++	// Sending/downlink is independent of the still-unprimed receive reserve.
++	sample := bytes.Repeat([]byte{9}, cloudPCMFrameBytes)
++	if !bytes.Equal(b.frameDownlink(sample, time.Now()), sample) {
++		t.Fatal("capture/send delayed or changed")
++	}
++	if err := b.write(bytes.Repeat([]byte{2}, cloudPCMFrameBytes)); err != nil {
++		t.Fatal(err)
++	}
++	receiver.SetReadDeadline(time.Now().Add(time.Second))
++	if _, err := io.ReadFull(receiver, buf); err != nil || buf[0] != 1 {
++		t.Fatal("worker did not play", err)
++	}
++	cancel()
++	b.close()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("worker leaked")
++	}
++	b.mu.Lock()
++	remaining := len(b.uplinkBuffer.frames)
++	b.mu.Unlock()
++	if remaining != 0 {
++		t.Fatal("hangup retained audio")
++	}
++	// A late connector cannot resurrect this disposed bridge.
++	late, peer := net.Pipe()
++	defer peer.Close()
++	b.set(late)
++	if b.conn != nil {
++		t.Fatal("late reconnect resurrected audio")
++	}
++}
++func TestBridgeReconnectKeepsPolicyButDropsSamples(t *testing.T) {
++	b := &cloudPCMBridge{}
++	b.configureAudioBuffer(manual720())
++	a, peer := net.Pipe()
++	defer peer.Close()
++	b.set(a)
++	b.write(make([]byte, cloudPCMFrameBytes))
++	b.clear(a)
++	c, peer2 := net.Pipe()
++	defer peer2.Close()
++	b.set(c)
++	defer b.close()
++	if len(b.uplinkBuffer.frames) != 0 || b.uplinkBuffer.policy != manual720() || b.uplinkBuffer.primed {
++		t.Fatal("reconnect reused audio or lost policy")
++	}
++	// Completion from an older connector must not clear the new one.
++	b.clear(a)
++	if b.conn != c {
++		t.Fatal("stale completion closed new media")
++	}
++}
++func TestAnswerSnapshotSurvivesActualWebSocketSessions(t *testing.T) {
++	a, d := cloudEarlyAgentFixture(t)
++	d.AudioBuffer = &cloudAudioBufferSnapshot{}
++	for session, ms := range []int{720, 240} {
++		server, client := net.Pipe()
++		socket := &cloudWebSocket{conn: server, reader: bufio.NewReader(server)}
++		peer := &cloudWebSocket{conn: client, reader: bufio.NewReader(client)}
++		ctx, cancel := context.WithCancel(context.Background())
++		done := make(chan struct{})
++		go func() { a.serveCloudCall(ctx, socket, d, newCloudMediaHealthTracker(time.Now(), d)); close(done) }()
++		client.SetDeadline(time.Now().Add(2 * time.Second))
++		if _, _, err := peer.ReadMessage(); err != nil {
++			t.Fatal(err)
++		} // agent_ready
++		for _, generation := range []uint64{d.Generation + 1, d.Generation, d.Generation} {
++			raw, _ := json.Marshal(map[string]any{"action": "answer", "call_id": d.CallID, "call_uuid": d.CallUUID, "generation": generation, "owner": "iphone", "audio_buffer_version": 1, "audio_buffer_mode": "manual", "audio_buffer_ms": ms})
++			if err := peer.WriteText(raw); err != nil {
++				t.Fatal(err)
++			}
++			if _, _, err := peer.ReadMessage(); err != nil {
++				t.Fatal(err)
++			}
++			d.AudioBuffer.mu.Lock()
++			selected, policy := d.AudioBuffer.selected, d.AudioBuffer.policy
++			d.AudioBuffer.mu.Unlock()
++			if generation != d.Generation && session == 0 && selected {
++				t.Fatal("bad identity selected policy")
++			}
++			if generation == d.Generation && (!selected || policy != manual720()) {
++				t.Fatal("repeated/reconnected answer changed policy", policy)
++			}
++		}
++		cancel()
++		client.Close()
++		server.Close()
++		select {
++		case <-done:
++		case <-time.After(time.Second):
++			t.Fatal("websocket session leaked")
++		}
++	}
++}
 diff --git a/module/module-agent/cloud_call.go b/module/module-agent/cloud_call.go
-index 0357f2d..24efee4 100644
+index 0357f2d..a805874 100644
 --- a/module/module-agent/cloud_call.go
 +++ b/module/module-agent/cloud_call.go
-@@ -22,6 +22,7 @@ import (
+@@ -22,6 +22,8 @@ import (
  )
  
  type cloudCallDescriptor struct {
++	AudioBuffer    *cloudAudioBufferSnapshot
 +	LocalCallID    string // MU300 UUID from the authenticated dial receipt, never the Relay ID
  	CallID         string
  	CallUUID       string
  	Generation     uint64
-@@ -47,14 +48,16 @@ func cloudMediaURL(relayURL, callUUID, callSecret string) (string, error) {
+@@ -47,14 +49,20 @@ func cloudMediaURL(relayURL, callUUID, callSecret string) (string, error) {
  }
  
  type cloudCallAction struct {
@@ -226,20 +575,24 @@ index 0357f2d..24efee4 100644
 -	TraceID       string `json:"trace_id,omitempty"`
 -	Owner         string `json:"owner"`
 -	MediaProtocol string `json:"media_protocol,omitempty"`
-+	EarlyMediaVersion    int    `json:"early_media_version,omitempty"`
-+	EarlyMediaNegotiated bool   `json:"-"`
-+	Action               string `json:"action"`
-+	CallID               string `json:"call_id"`
-+	CallUUID             string `json:"call_uuid,omitempty"`
-+	Generation           uint64 `json:"generation,omitempty"`
-+	CommandID            string `json:"command_id,omitempty"`
-+	TraceID              string `json:"trace_id,omitempty"`
-+	Owner                string `json:"owner"`
-+	MediaProtocol        string `json:"media_protocol,omitempty"`
++	AudioBufferVersion   json.RawMessage `json:"audio_buffer_version,omitempty"`
++	AudioBufferMode      json.RawMessage `json:"audio_buffer_mode,omitempty"`
++	AudioBufferMS        json.RawMessage `json:"audio_buffer_ms,omitempty"`
++	AudioBufferIdentity  bool            `json:"-"`
++	EarlyMediaVersion    int             `json:"early_media_version,omitempty"`
++	EarlyMediaNegotiated bool            `json:"-"`
++	Action               string          `json:"action"`
++	CallID               string          `json:"call_id"`
++	CallUUID             string          `json:"call_uuid,omitempty"`
++	Generation           uint64          `json:"generation,omitempty"`
++	CommandID            string          `json:"command_id,omitempty"`
++	TraceID              string          `json:"trace_id,omitempty"`
++	Owner                string          `json:"owner"`
++	MediaProtocol        string          `json:"media_protocol,omitempty"`
  }
  
  func decodeCloudCallAction(data []byte, expectedCallID string) (cloudCallAction, error) {
-@@ -75,6 +78,12 @@ func decodeCloudCallActionForDescriptor(data []byte, descriptor cloudCallDescrip
+@@ -75,6 +83,13 @@ func decodeCloudCallActionForDescriptor(data []byte, descriptor cloudCallDescrip
  		!strings.EqualFold(value.CallUUID, descriptor.CallUUID) {
  		return cloudCallAction{}, fmt.Errorf("公网控制的 call_uuid 不属于当前通话")
  	}
@@ -249,10 +602,35 @@ index 0357f2d..24efee4 100644
 +		descriptor.Direction == "outgoing" && descriptor.CallUUID != "" &&
 +		value.CallUUID != "" && strings.EqualFold(value.CallUUID, descriptor.CallUUID) &&
 +		value.Generation > 0 && value.Generation == descriptor.Generation
++	value.AudioBufferIdentity = descriptor.CallUUID != "" && value.CallUUID != "" && strings.EqualFold(value.CallUUID, descriptor.CallUUID) && value.Generation > 0 && value.Generation == descriptor.Generation
  	expectedGeneration := descriptor.Generation
  	if expectedGeneration == 0 {
  		expectedGeneration = 1
-@@ -258,6 +267,9 @@ func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor
+@@ -173,6 +188,13 @@ func (a *agent) startCloudCall(descriptor cloudCallDescriptor) {
+ 		descriptor.StartedAt = time.Now()
+ 	}
+ 	a.cloudCallMu.Lock()
++	// A restarted transport for the same identity keeps its first answer policy.
++	if current := a.cloudCallCurrent; current != nil && sameCloudAudioIdentity(*current, descriptor) {
++		descriptor.AudioBuffer = current.AudioBuffer
++	}
++	if descriptor.AudioBuffer == nil {
++		descriptor.AudioBuffer = &cloudAudioBufferSnapshot{}
++	}
+ 	if a.cloudCallCancel != nil {
+ 		a.cloudCallCancel()
+ 	}
+@@ -210,6 +232,9 @@ func (a *agent) retireCloudCallDescriptor(descriptor cloudCallDescriptor) {
+ }
+ 
+ func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor) {
++	if descriptor.AudioBuffer == nil {
++		descriptor.AudioBuffer = &cloudAudioBufferSnapshot{}
++	}
+ 	descriptor.MediaTransport = resolveCloudMediaTransport(
+ 		descriptor.MediaTransport,
+ 		[]string{cloudMediaTransportLegacyPCM},
+@@ -258,6 +283,9 @@ func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor
  }
  
  func (a *agent) cloudCallDescriptorAlive(descriptor cloudCallDescriptor) bool {
@@ -262,7 +640,7 @@ index 0357f2d..24efee4 100644
  	if descriptor.Direction != "outgoing" {
  		return a.cloudCallStillExists(descriptor.CallID)
  	}
-@@ -295,6 +307,14 @@ func establishCloudPCMConnection(
+@@ -295,6 +323,14 @@ func establishCloudPCMConnection(
  func (a *agent) cloudCallStillExists(callID string) bool {
  	a.mu.RLock()
  	defer a.mu.RUnlock()
@@ -277,16 +655,64 @@ index 0357f2d..24efee4 100644
  	return a.calls.Active != nil && a.calls.Active.ID == callID
  }
  
-@@ -416,6 +436,8 @@ func (a *agent) serveCloudCall(
+@@ -304,6 +340,8 @@ type cloudPCMBridge struct {
+ 	health           *cloudMediaHealthTracker
+ 	mediaProtocol    string
+ 	downlinkSequence uint32
++	bufferPolicy     cloudAudioBufferPolicy
++	closed           bool
+ 	uplinkBuffer     cloudPCMSpeechBuffer
+ 	uplinkFramer     cloudPCMFramer
+ }
+@@ -383,17 +421,25 @@ func (bridge *cloudPCMBridge) frameDownlink(payload []byte, timestamp time.Time)
+ 
+ func (bridge *cloudPCMBridge) set(connection net.Conn) {
+ 	bridge.mu.Lock()
++	if bridge.closed {
++		bridge.mu.Unlock()
++		connection.Close()
++		return
++	}
+ 	if bridge.conn != nil {
+ 		_ = bridge.conn.Close()
+ 	}
+ 	bridge.conn = connection
+-	bridge.uplinkBuffer = cloudPCMSpeechBuffer{}
++	bridge.uplinkBuffer = cloudPCMSpeechBuffer{policy: bridge.bufferPolicy}
+ 	bridge.uplinkFramer = cloudPCMFramer{}
+ 	bridge.mu.Unlock()
+ }
+ 
+ func (bridge *cloudPCMBridge) close() {
+ 	bridge.mu.Lock()
++	bridge.closed = true
++	bridge.uplinkBuffer = cloudPCMSpeechBuffer{}
++	bridge.uplinkFramer = cloudPCMFramer{}
+ 	if bridge.conn != nil {
+ 		_ = bridge.conn.Close()
+ 	}
+@@ -404,6 +450,8 @@ func (bridge *cloudPCMBridge) close() {
+ func (bridge *cloudPCMBridge) clear(connection net.Conn) {
+ 	bridge.mu.Lock()
+ 	if bridge.conn == connection {
++		bridge.uplinkBuffer = cloudPCMSpeechBuffer{policy: bridge.bufferPolicy}
++		bridge.uplinkFramer = cloudPCMFramer{}
+ 		_ = bridge.conn.Close()
+ 		bridge.conn = nil
+ 	}
+@@ -416,6 +464,11 @@ func (a *agent) serveCloudCall(
  	descriptor cloudCallDescriptor,
  	health *cloudMediaHealthTracker,
  ) bool {
 +	ctx, cancel := context.WithCancel(ctx)
 +	defer cancel()
++	if descriptor.AudioBuffer == nil {
++		descriptor.AudioBuffer = &cloudAudioBufferSnapshot{}
++	}
  	bridge := &cloudPCMBridge{health: health}
  	defer bridge.close()
  	playbackContext, stopPlayback := context.WithCancel(ctx)
-@@ -443,6 +465,10 @@ func (a *agent) serveCloudCall(
+@@ -443,6 +496,10 @@ func (a *agent) serveCloudCall(
  					a.mu.RLock()
  					alive = a.calls.Active != nil && a.calls.Active.Direction == "outgoing"
  					a.mu.RUnlock()
@@ -297,7 +723,24 @@ index 0357f2d..24efee4 100644
  					seenOutgoing = seenOutgoing || alive
  					if !seenOutgoing && time.Since(missingSince) < 20*time.Second {
  						continue
-@@ -504,9 +530,14 @@ func (a *agent) serveCloudCall(
+@@ -483,6 +540,10 @@ func (a *agent) serveCloudCall(
+ 			a.debug.add("cloud-call-control", "received", "收到公网通话控制", "", fields)
+ 			switch control.Action {
+ 			case "answer":
++				if a.profile.Name == "mu300-openwrt" && (ctx.Err() != nil || !a.cloudCallDescriptorAlive(descriptor)) {
++					_ = socket.WriteText(cloudStatusForAction("action_error", "通话已结束或被替换", descriptor, control))
++					continue
++				}
+ 				startMedia := false
+ 				if !mediaStarted {
+ 					bridge.setMediaProtocol(control.MediaProtocol)
+@@ -501,12 +562,20 @@ func (a *agent) serveCloudCall(
+ 						a.voice.mu.Unlock()
+ 					}
+ 				}
++				if startMedia && a.profile.Name == "mu300-openwrt" {
++					bridge.configureAudioBuffer(descriptor.AudioBuffer.accept(control))
++				}
  				health.markAnswerAcknowledged(time.Now())
  				_ = socket.WriteText(cloudStatusForAction(cloudPCMMilestoneAnswerOK, "", descriptor, control))
  				a.debug.add("cloud-call-control", "completed", "公网接听命令已执行", "", fields)
@@ -313,7 +756,7 @@ index 0357f2d..24efee4 100644
  					} else {
  						go a.connectCloudPCM(ctx, socket, bridge, descriptor, health)
  					}
-@@ -530,6 +561,15 @@ func (a *agent) serveCloudCall(
+@@ -530,6 +599,15 @@ func (a *agent) serveCloudCall(
  				go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "ended") }()
  				return true
  			case "end":
@@ -329,7 +772,7 @@ index 0357f2d..24efee4 100644
  				if a.profile.AndroidTelecom {
  					a.debug.add("cloud-call-control", "modem_executing", "执行挂断命令", a.callControlBackendDescription(), fields)
  					if err := a.executeIncomingCloudCallAction(control, "end"); err != nil {
-@@ -568,6 +608,15 @@ func (a *agent) callControlBackendDescription() string {
+@@ -568,6 +646,15 @@ func (a *agent) callControlBackendDescription() string {
  }
  
  func (a *agent) executeIncomingCloudCallAction(control cloudCallAction, action string) error {
@@ -345,7 +788,7 @@ index 0357f2d..24efee4 100644
  	if !a.profile.AndroidTelecom {
  		switch action {
  		case "answer":
-@@ -775,6 +824,12 @@ func (a *agent) connectCloudPCM(
+@@ -775,6 +862,12 @@ func (a *agent) connectCloudPCM(
  			_ = socket.WriteText(cloudStatus("action_error", "模块 PCM 启动超时"))
  			return
  		}
@@ -358,7 +801,7 @@ index 0357f2d..24efee4 100644
  		// 只等待 7580 开始监听，随后立即建立客户端连接。完整 ready 状态必须
  		// 在 AIRSIMPCM1/AIRSIMREADY 握手和双向线程启动后才成立。
  		connection, err := establishCloudPCMConnection(
-@@ -823,7 +878,11 @@ func (a *agent) connectCloudPCM(
+@@ -823,7 +916,11 @@ func (a *agent) connectCloudPCM(
  			cloudPCMMilestoneListening, "",
  			cloudPCMTransmissionStatsFromHealth(health.snapshot()),
  		))
@@ -371,7 +814,7 @@ index 0357f2d..24efee4 100644
  			a.debug.add("voice-backend", "handshake_failed", "三星 PCM 握手失败", err.Error(), map[string]string{
  				"backend": string(a.voiceBackend.kind),
  			})
-@@ -833,6 +892,14 @@ func (a *agent) connectCloudPCM(
+@@ -833,6 +930,14 @@ func (a *agent) connectCloudPCM(
  			}
  			continue
  		}
@@ -386,7 +829,7 @@ index 0357f2d..24efee4 100644
  		a.markVoiceBackendHandshakeReady()
  		a.debug.add("voice-backend", "ready", "三星 PCM 媒体会话已建立", "", map[string]string{
  			"backend": string(a.voiceBackend.kind),
-@@ -952,7 +1019,12 @@ func (a *agent) startOutgoingCloudPCM(
+@@ -952,7 +1057,12 @@ func (a *agent) startOutgoingCloudPCM(
  	bridge *cloudPCMBridge,
  	descriptor cloudCallDescriptor,
  	health *cloudMediaHealthTracker,
@@ -399,7 +842,7 @@ index 0357f2d..24efee4 100644
  	deadline := time.Now().Add(3 * time.Minute)
  	ticker := time.NewTicker(250 * time.Millisecond)
  	defer ticker.Stop()
-@@ -1057,7 +1129,11 @@ func (framer *cloudPCMFramer) append(chunk []byte) [][]byte {
+@@ -1057,7 +1167,11 @@ func (framer *cloudPCMFramer) append(chunk []byte) [][]byte {
  func (framer *cloudPCMFramer) buffered() int { return len(framer.pending) }
  
  func cloudPCMHandshake(connection net.Conn) error {
@@ -412,7 +855,7 @@ index 0357f2d..24efee4 100644
  	if _, err := connection.Write([]byte("AIRSIMPCM1\n")); err != nil {
  		return err
  	}
-@@ -1180,6 +1256,8 @@ func (socket *cloudWebSocket) writeMessage(opcode byte, payload []byte) error {
+@@ -1180,6 +1294,8 @@ func (socket *cloudWebSocket) writeMessage(opcode byte, payload []byte) error {
  	}
  	socket.writeMu.Lock()
  	defer socket.writeMu.Unlock()
@@ -467,6 +910,116 @@ index f3de002..6696b58 100644
  		if err != nil {
  			result.Status, result.Error = "failed", err.Error()
  			break
+diff --git a/module/module-agent/cloud_pcm_buffer.go b/module/module-agent/cloud_pcm_buffer.go
+index 91cd95f..5d1cecc 100644
+--- a/module/module-agent/cloud_pcm_buffer.go
++++ b/module/module-agent/cloud_pcm_buffer.go
+@@ -9,37 +9,56 @@ import (
+ // playout clock preserves speech cadence instead of dumping a burst into PCM.
+ // Access is serialized by cloudPCMBridge.mu.
+ type cloudPCMSpeechBuffer struct {
+-	frames      [][]byte
+-	target      int
+-	primed      bool
+-	lastArrival time.Time
+-	jitter      float64
+-	dropped     uint64
+-	underruns   uint64
++	policy       cloudAudioBufferPolicy
++	stableFrames int
++	frames       [][]byte
++	target       int
++	primed       bool
++	lastArrival  time.Time
++	jitter       float64
++	dropped      uint64
++	underruns    uint64
+ }
+ 
+ func (b *cloudPCMSpeechBuffer) enqueue(frame []byte, at time.Time) {
++	if len(frame) != cloudPCMFrameBytes {
++		return
++	}
++	if b.policy.minimum == 0 {
++		b.policy = automaticCloudAudioPolicy()
++	}
+ 	if b.target == 0 {
+-		b.target = 10
++		b.target = b.policy.minimum
+ 	}
+-	if !b.lastArrival.IsZero() {
++	if !b.lastArrival.IsZero() && b.policy.mode != "manual" {
+ 		variation := math.Abs(at.Sub(b.lastArrival).Seconds() - 0.02)
+ 		b.jitter += (variation - b.jitter) / 16
+-		desired := 10 + int(4*b.jitter/0.02)
+-		if desired > 30 {
+-			desired = 30
++		desired := b.policy.minimum + int(4*b.jitter/cloudAudioFrameDuration.Seconds())
++		if desired > b.policy.maximum {
++			desired = b.policy.maximum
+ 		}
+ 		if desired > b.target {
+ 			b.target = desired
+ 		}
++		if b.policy.mode == "stable" {
++			delta := at.Sub(b.lastArrival)
++			if delta >= 15*time.Millisecond && delta <= 25*time.Millisecond {
++				b.stableFrames++
++			} else {
++				b.stableFrames = 0
++			}
++			if b.stableFrames >= 100 {
++				if b.target > b.policy.minimum {
++					b.target--
++				}
++				b.stableFrames = 0
++				b.trim(b.target + 2)
++			}
++		}
+ 	}
+ 	b.lastArrival = at
+ 	b.frames = append(b.frames, append([]byte(nil), frame...))
+-	if len(b.frames) > 50 {
+-		b.frames[0] = nil
+-		b.frames = b.frames[1:]
+-		b.dropped++
+-	}
++	b.trim(b.policy.capacity)
+ }
+ 
+ func (b *cloudPCMSpeechBuffer) pop() []byte {
+@@ -52,9 +71,16 @@ func (b *cloudPCMSpeechBuffer) pop() []byte {
+ 	if len(b.frames) == 0 {
+ 		b.primed = false
+ 		b.underruns++
+-		b.target += 5
+-		if b.target > 30 {
+-			b.target = 30
++		b.stableFrames = 0
++		if b.policy.mode != "manual" {
++			step := 5
++			if b.policy.mode == "stable" {
++				step = 1
++			}
++			b.target += step
++			if b.target > b.policy.maximum {
++				b.target = b.policy.maximum
++			}
+ 		}
+ 		return nil
+ 	}
+@@ -63,3 +89,11 @@ func (b *cloudPCMSpeechBuffer) pop() []byte {
+ 	b.frames = b.frames[1:]
+ 	return frame
+ }
++
++func (b *cloudPCMSpeechBuffer) trim(maximum int) {
++	for len(b.frames) > maximum {
++		b.frames[0] = nil
++		b.frames = b.frames[1:]
++		b.dropped++
++	}
++}
 diff --git a/module/module-agent/main.go b/module/module-agent/main.go
 index 338c9a6..0128860 100644
 --- a/module/module-agent/main.go
