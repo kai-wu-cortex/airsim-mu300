@@ -28,6 +28,8 @@ type Gateway struct {
 	keys            []string
 	seen            map[string]int64
 	pcm             bool
+	watchBackend    WatchBackend
+	watchLeases     map[string]*watchLease
 	earlyBackend    EarlyMediaBackend
 	earlyLeases     map[string]*earlyLease
 	earlyStreamDone chan struct{}
@@ -100,6 +102,13 @@ func (g *Gateway) Add(encoded string) error {
 		}
 	}
 	keys := append(append([]string(nil), g.keys...), encoded)
+	if err := g.persistKeys(keys); err != nil {
+		return err
+	}
+	g.keys = keys
+	return nil
+}
+func (g *Gateway) persistKeys(keys []string) error {
 	b, _ := json.Marshal(keys)
 	f, err := os.OpenFile(g.path+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
@@ -121,9 +130,9 @@ func (g *Gateway) Add(encoded string) error {
 	if err = os.Rename(g.path+".tmp", g.path); err != nil {
 		return err
 	}
-	g.keys = keys
 	return nil
 }
+
 func Sign(key []byte, canonical string) string {
 	m := hmac.New(sha256.New, key)
 	m.Write([]byte(canonical))
@@ -182,6 +191,10 @@ func allowed(method, path string) bool {
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.event("control_request")
 	w.Header().Set("Cache-Control", "no-store")
+	if strings.HasPrefix(r.URL.Path, "/api/watch/") {
+		g.serveWatch(w, r)
+		return
+	}
 	if !allowed(r.Method, r.URL.Path) {
 		http.Error(w, "not found", 404)
 		return
@@ -212,6 +225,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		capable, number, battery := g.agentIdentity(r.Context())
 		health := map[string]any{"ok": true, "version": 1, "transport": "vowlan", "agent_id": g.id, "identity_proof": Sign(key, "AIRSIM-HEALTH1\n"+nonce+"\n"+g.id), "canonical_call_ids": capable, "phone_number": number, "agent_kind": "mu300", "device_name": "AirSIM MU300", "manufacturer": "ZTE", "model": "MU300"}
+		if g.watchBackend != nil {
+			health["watch_direct_version"] = 2
+		}
 		if battery != nil {
 			health["battery"] = battery
 		}
@@ -344,13 +360,21 @@ func (g *Gateway) ServePCM(ctx context.Context, c net.Conn) {
 	g.event("pcm_connection")
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReaderSize(c, 1024)
+	reader := bufio.NewReaderSize(c, 4096)
 	line, err := reader.ReadSlice('\n')
-	if err != nil || len(line) > 1024 {
+	if err != nil || len(line) > 4096 {
 		g.event("pcm_header_rejected")
 		return
 	}
 	parts := strings.Split(strings.TrimSuffix(string(line), "\n"), " ")
+	if len(parts) > 0 && parts[0] == "AIRSIMWATCH2" {
+		g.serveWatchPCM(ctx, c, reader, parts)
+		return
+	}
+	if len(line) > 1024 {
+		g.event("pcm_header_rejected")
+		return
+	}
 	if len(parts) > 0 && parts[0] == "AIRSIMEM1" {
 		g.serveEarlyPCM(ctx, c, reader, parts)
 		return

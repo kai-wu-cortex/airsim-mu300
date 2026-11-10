@@ -141,6 +141,7 @@ func main() {
 	if e != nil {
 		log.Fatal(e)
 	}
+	d.gateway.SetWatchBackend(gateway.NewMU300WatchBackend())
 	d.gateway.SetEarlyMediaBackend(gateway.NewMU300EarlyMediaBackend(d.bridge.OpenEarlyMedia))
 	if *trial {
 		d.gateway.SetEarlyMediaBackend(gateway.NewMU300EarlyMediaTrialBackend(d.bridge.OpenEarlyMedia, filepath.Join(*data, "early-media-trial.json")))
@@ -179,6 +180,7 @@ func main() {
 	admin.HandleFunc("/status", d.status)
 	// Internal Agent transport only; never registered on the LAN control mux.
 	admin.HandleFunc("/internal/cloud-early-media", d.gateway.ServeCloudEarlyMedia)
+	admin.HandleFunc("/internal/watch/revoke-parent", d.gateway.ServeRevokeParent)
 	admin.HandleFunc("/pair/start", d.startPair)
 	admin.HandleFunc("/pair/cancel", d.cancelPair)
 	admin.HandleFunc("/number/refresh", d.refreshNumber)

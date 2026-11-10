@@ -551,7 +551,7 @@ index 0000000..9372fcc
 +	}
 +}
 diff --git a/module/module-agent/cloud_call.go b/module/module-agent/cloud_call.go
-index 0357f2d..a805874 100644
+index 0357f2d..8d8a437 100644
 --- a/module/module-agent/cloud_call.go
 +++ b/module/module-agent/cloud_call.go
 @@ -22,6 +22,8 @@ import (
@@ -734,7 +734,7 @@ index 0357f2d..a805874 100644
  				startMedia := false
  				if !mediaStarted {
  					bridge.setMediaProtocol(control.MediaProtocol)
-@@ -501,12 +562,20 @@ func (a *agent) serveCloudCall(
+@@ -501,19 +562,27 @@ func (a *agent) serveCloudCall(
  						a.voice.mu.Unlock()
  					}
  				}
@@ -756,8 +756,22 @@ index 0357f2d..a805874 100644
  					} else {
  						go a.connectCloudPCM(ctx, socket, bridge, descriptor, health)
  					}
-@@ -530,6 +599,15 @@ func (a *agent) serveCloudCall(
- 				go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "ended") }()
+ 				}
+ 				if descriptor.Direction != "outgoing" {
+ 					go func() {
+-						if err := a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "active"); err != nil {
++						if err := a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, control.Owner, "active"); err != nil {
+ 							a.debug.add("cloud-call", "error", "同步接听所有权失败", err.Error(), map[string]string{"call_id": descriptor.CallID, "owner": control.Owner})
+ 						}
+ 					}()
+@@ -527,9 +596,22 @@ func (a *agent) serveCloudCall(
+ 				}
+ 				_ = socket.WriteText(cloudStatusForAction("rejected", "", descriptor, control))
+ 				a.debug.add("cloud-call-control", "completed", "公网拒接命令已执行", "", fields)
+-				go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "ended") }()
++				go func() {
++					_ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, control.Owner, "ended")
++				}()
  				return true
  			case "end":
 +				if a.profile.Name == "mu300-openwrt" {
@@ -766,13 +780,37 @@ index 0357f2d..a805874 100644
 +						continue
 +					}
 +					_ = socket.WriteText(cloudStatusForAction("ended", "", descriptor, control))
-+					go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "ended") }()
++					go func() {
++						_ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, control.Owner, "ended")
++					}()
 +					return true
 +				}
  				if a.profile.AndroidTelecom {
  					a.debug.add("cloud-call-control", "modem_executing", "执行挂断命令", a.callControlBackendDescription(), fields)
  					if err := a.executeIncomingCloudCallAction(control, "end"); err != nil {
-@@ -568,6 +646,15 @@ func (a *agent) callControlBackendDescription() string {
+@@ -539,7 +621,9 @@ func (a *agent) serveCloudCall(
+ 					}
+ 					_ = socket.WriteText(cloudStatusForAction("ended", "", descriptor, control))
+ 					a.debug.add("cloud-call-control", "completed", "公网挂断已由 Android Telecom 接受", "", fields)
+-					go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "ended") }()
++					go func() {
++						_ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, control.Owner, "ended")
++					}()
+ 					return true
+ 				}
+ 				a.debug.add("cloud-call-control", "modem_executing", "执行挂断并确认基带状态", "ATH（失败时回退 AT+CHUP）→ AT+CLCC", fields)
+@@ -552,7 +636,9 @@ func (a *agent) serveCloudCall(
+ 				_ = socket.WriteText(cloudStatusForAction("ended", "", descriptor, control))
+ 				fields["clcc_attempts"] = fmt.Sprintf("%d", attempts)
+ 				a.debug.add("cloud-call-control", "completed", "公网挂断已由 CLCC 确认", lastCLCC, fields)
+-				go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, control.Owner, "ended") }()
++				go func() {
++					_ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, control.Owner, "ended")
++				}()
+ 				return true
+ 			}
+ 		}
+@@ -568,6 +654,15 @@ func (a *agent) callControlBackendDescription() string {
  }
  
  func (a *agent) executeIncomingCloudCallAction(control cloudCallAction, action string) error {
@@ -788,7 +826,7 @@ index 0357f2d..a805874 100644
  	if !a.profile.AndroidTelecom {
  		switch action {
  		case "answer":
-@@ -775,6 +862,12 @@ func (a *agent) connectCloudPCM(
+@@ -775,6 +870,12 @@ func (a *agent) connectCloudPCM(
  			_ = socket.WriteText(cloudStatus("action_error", "模块 PCM 启动超时"))
  			return
  		}
@@ -801,7 +839,7 @@ index 0357f2d..a805874 100644
  		// 只等待 7580 开始监听，随后立即建立客户端连接。完整 ready 状态必须
  		// 在 AIRSIMPCM1/AIRSIMREADY 握手和双向线程启动后才成立。
  		connection, err := establishCloudPCMConnection(
-@@ -823,7 +916,11 @@ func (a *agent) connectCloudPCM(
+@@ -823,7 +924,11 @@ func (a *agent) connectCloudPCM(
  			cloudPCMMilestoneListening, "",
  			cloudPCMTransmissionStatsFromHealth(health.snapshot()),
  		))
@@ -814,7 +852,7 @@ index 0357f2d..a805874 100644
  			a.debug.add("voice-backend", "handshake_failed", "三星 PCM 握手失败", err.Error(), map[string]string{
  				"backend": string(a.voiceBackend.kind),
  			})
-@@ -833,6 +930,14 @@ func (a *agent) connectCloudPCM(
+@@ -833,6 +938,14 @@ func (a *agent) connectCloudPCM(
  			}
  			continue
  		}
@@ -829,7 +867,7 @@ index 0357f2d..a805874 100644
  		a.markVoiceBackendHandshakeReady()
  		a.debug.add("voice-backend", "ready", "三星 PCM 媒体会话已建立", "", map[string]string{
  			"backend": string(a.voiceBackend.kind),
-@@ -952,7 +1057,12 @@ func (a *agent) startOutgoingCloudPCM(
+@@ -952,7 +1065,12 @@ func (a *agent) startOutgoingCloudPCM(
  	bridge *cloudPCMBridge,
  	descriptor cloudCallDescriptor,
  	health *cloudMediaHealthTracker,
@@ -842,7 +880,7 @@ index 0357f2d..a805874 100644
  	deadline := time.Now().Add(3 * time.Minute)
  	ticker := time.NewTicker(250 * time.Millisecond)
  	defer ticker.Stop()
-@@ -1057,7 +1167,11 @@ func (framer *cloudPCMFramer) append(chunk []byte) [][]byte {
+@@ -1057,7 +1175,11 @@ func (framer *cloudPCMFramer) append(chunk []byte) [][]byte {
  func (framer *cloudPCMFramer) buffered() int { return len(framer.pending) }
  
  func cloudPCMHandshake(connection net.Conn) error {
@@ -855,7 +893,7 @@ index 0357f2d..a805874 100644
  	if _, err := connection.Write([]byte("AIRSIMPCM1\n")); err != nil {
  		return err
  	}
-@@ -1180,6 +1294,8 @@ func (socket *cloudWebSocket) writeMessage(opcode byte, payload []byte) error {
+@@ -1180,6 +1302,8 @@ func (socket *cloudWebSocket) writeMessage(opcode byte, payload []byte) error {
  	}
  	socket.writeMu.Lock()
  	defer socket.writeMu.Unlock()
@@ -865,7 +903,7 @@ index 0357f2d..a805874 100644
  	switch {
  	case len(payload) < 126:
 diff --git a/module/module-agent/cloud_command.go b/module/module-agent/cloud_command.go
-index f3de002..6696b58 100644
+index f3de002..1c8ef8f 100644
 --- a/module/module-agent/cloud_command.go
 +++ b/module/module-agent/cloud_command.go
 @@ -34,6 +34,7 @@ type cloudDeviceCommand struct {
@@ -910,6 +948,28 @@ index f3de002..6696b58 100644
  		if err != nil {
  			result.Status, result.Error = "failed", err.Error()
  			break
+@@ -326,7 +335,9 @@ func (a *agent) executeCloudCommandFor(command cloudDeviceCommand, origin *pushR
+ 				result.Result = map[string]any{"ended": true, "android_confirmed": true}
+ 				a.retireCloudCallDescriptor(descriptor)
+ 				if a.push != nil {
+-					go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, command.Owner, "ended") }()
++					go func() {
++						_ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, command.Owner, "ended")
++					}()
+ 				}
+ 			default:
+ 				result.Status, result.Error = "failed", "不支持的公网通话控制动作"
+@@ -350,7 +361,9 @@ func (a *agent) executeCloudCommandFor(command cloudDeviceCommand, origin *pushR
+ 			a.debug.add("cloud-call-control", "completed", "独立通道挂断已由 CLCC 确认", lastCLCC, fields)
+ 			a.retireCloudCallDescriptor(descriptor)
+ 			if a.push != nil {
+-				go func() { _ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, command.Owner, "ended") }()
++				go func() {
++					_ = a.push.sendCallOwner(descriptor.CallID, descriptor.CallUUID, descriptor.Generation, command.Owner, "ended")
++				}()
+ 			}
+ 		case "answer":
+ 			if err := a.answerCall(); err != nil {
 diff --git a/module/module-agent/cloud_pcm_buffer.go b/module/module-agent/cloud_pcm_buffer.go
 index 91cd95f..5d1cecc 100644
 --- a/module/module-agent/cloud_pcm_buffer.go
@@ -1021,14 +1081,16 @@ index 91cd95f..5d1cecc 100644
 +	}
 +}
 diff --git a/module/module-agent/main.go b/module/module-agent/main.go
-index 338c9a6..0128860 100644
+index 338c9a6..f9e5034 100644
 --- a/module/module-agent/main.go
 +++ b/module/module-agent/main.go
-@@ -29,6 +29,14 @@ const (
+@@ -29,6 +29,16 @@ const (
  )
  
  type agent struct {
 +	mu300BatteryRoot     string // Empty in production; fixture root for read-only battery tests.
++	mu300WatchMu         sync.Mutex
++	mu300WatchBindings   map[watchIdentity]*watchBinding // guarded by mu300WatchMu
 +	mu300Operations      *mu300OperationStore
 +	mu300SMS             *mu300SMSBackend
 +	mu300URC             *mu300URCTail
@@ -1039,7 +1101,7 @@ index 338c9a6..0128860 100644
  	at                   *atPort
  	profile              runtimeProfile
  	gpsCommand           func(string, time.Duration) (string, error)
-@@ -67,6 +75,11 @@ type agent struct {
+@@ -67,6 +77,11 @@ type agent struct {
  	callControlCommand   func(string, time.Duration) (string, error)
  	callControlSleep     func(time.Duration)
  	callControlDelays    []time.Duration
@@ -1051,7 +1113,7 @@ index 338c9a6..0128860 100644
  	cloudCommandExecMu   sync.Mutex
  	cloudCommandMu       sync.Mutex
  	cloudCommandResults  map[string]cloudCommandResult
-@@ -80,6 +93,9 @@ type agent struct {
+@@ -80,6 +95,9 @@ type agent struct {
  }
  
  func newAgent(atPath string) *agent {
@@ -1061,7 +1123,7 @@ index 338c9a6..0128860 100644
  	voiceBackend, voiceBackendErr := loadVoiceBackend(os.Getenv)
  	androidToken, androidTokenErr := loadAndroidControlToken(os.Getenv)
  	service := &agent{
-@@ -96,6 +112,12 @@ func newAgent(atPath string) *agent {
+@@ -96,6 +114,12 @@ func newAgent(atPath string) *agent {
  		voiceBackend:        voiceBackend,
  		voiceBackendErr:     voiceBackendErr,
  	}
@@ -1074,7 +1136,7 @@ index 338c9a6..0128860 100644
  	service.at.setURCHandler(service.handleURC)
  	service.pairRegistrationSync = service.syncPushRegistration
  	service.push.onCallDelivered = service.startCloudCall
-@@ -148,13 +170,18 @@ func main() {
+@@ -148,13 +172,18 @@ func main() {
  	}
  
  	service := newAgent(atDevice)
@@ -1095,7 +1157,7 @@ index 338c9a6..0128860 100644
  	if modemAvailable {
  		defer service.at.close()
  		service.at.startURCMonitor()
-@@ -194,6 +221,9 @@ func main() {
+@@ -194,6 +223,9 @@ func main() {
  		IdleTimeout:       30 * time.Second,
  		MaxHeaderBytes:    16 << 10,
  	}
@@ -1105,7 +1167,7 @@ index 338c9a6..0128860 100644
  
  	stop := make(chan os.Signal, 1)
  	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-@@ -205,7 +235,7 @@ func main() {
+@@ -205,7 +237,7 @@ func main() {
  		_ = server.Shutdown(ctx)
  	}()
  
@@ -1114,11 +1176,12 @@ index 338c9a6..0128860 100644
  	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
  		logger.Fatalf("HTTP 服务退出: %v", err)
  	}
-@@ -301,9 +331,13 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
+@@ -301,9 +333,14 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
  	mux.HandleFunc("/api/push/status", a.pushStatus)
  	mux.HandleFunc("/api/push/mode", a.pushMode)
  	mux.HandleFunc("/api/calls/status", a.callStatus)
 +	mux.HandleFunc("/api/calls/resolve", a.mu300ResolvePushedCall)
++	mux.HandleFunc("/internal/watch/", a.mu300Watch)
 +	mux.HandleFunc("/api/calls/early-media", a.mu300EarlyMediaStatus)
 +	mux.HandleFunc("/api/calls/cloud-early-media", a.mu300CloudEarlyMediaStatus)
  	mux.HandleFunc("/api/calls/events", a.callEvents)
@@ -1128,7 +1191,7 @@ index 338c9a6..0128860 100644
  	mux.HandleFunc("/api/calls/answer", a.answer)
  	mux.HandleFunc("/api/calls/reject", a.reject)
  	mux.HandleFunc("/api/calls/hangup", a.hangup)
-@@ -398,7 +432,7 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
+@@ -398,7 +435,7 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
  			responseBody = "[debug snapshot body omitted from recursive capture]"
  		}
  		requestBody := requestCapture.text()
@@ -1137,7 +1200,7 @@ index 338c9a6..0128860 100644
  			requestBody = "[Android control body omitted]"
  			responseBody = "[SMS/control response body omitted]"
  		}
-@@ -571,6 +605,9 @@ func (a *agent) atKeepaliveLoop() {
+@@ -571,6 +608,9 @@ func (a *agent) atKeepaliveLoop() {
  }
  
  func (a *agent) smsPollLoop() {
@@ -1147,7 +1210,7 @@ index 338c9a6..0128860 100644
  	if a.profile.AndroidTelecom {
  		return
  	}
-@@ -605,6 +642,7 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
+@@ -605,6 +645,7 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
  	cellularState := a.modem.CellularState
  	cellularRecovery := a.modem.RecoveryState
  	registrationText := a.modem.RegistrationText
@@ -1155,7 +1218,7 @@ index 338c9a6..0128860 100644
  	a.mu.RUnlock()
  	atHealth := a.at.healthSnapshot()
  	hardwareAvailable := a.profile.RequiresModem
-@@ -619,7 +657,7 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
+@@ -619,7 +660,7 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
  	if !atHealth.LastSuccess.IsZero() {
  		lastSuccess = atHealth.LastSuccess.UTC().Format(time.RFC3339Nano)
  	}
@@ -1164,7 +1227,7 @@ index 338c9a6..0128860 100644
  		"product":                 "airsim",
  		"ok":                      agentHealthy,
  		"version":                 agentVersion,
-@@ -627,18 +665,23 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
+@@ -627,18 +668,23 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
  		"runtime_profile":         a.profile.Name,
  		"voice_backend":           a.voiceBackendName(),
  		"hardware_available":      hardwareAvailable,
@@ -1921,10 +1984,10 @@ index 0000000..8d5d6b0
 +}
 diff --git a/module/module-agent/mu300_calls.go b/module/module-agent/mu300_calls.go
 new file mode 100644
-index 0000000..91981f9
+index 0000000..561e97a
 --- /dev/null
 +++ b/module/module-agent/mu300_calls.go
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,448 @@
 +package main
 +
 +import (
@@ -2235,6 +2298,9 @@ index 0000000..91981f9
 +func (a *agent) mu300Control(action, expectedID, digit string) error {
 +	a.mu300CallMu.Lock()
 +	defer a.mu300CallMu.Unlock()
++	return a.mu300ControlLocked(action, expectedID, digit)
++}
++func (a *agent) mu300ControlLocked(action, expectedID, digit string) error {
 +	if err := a.mu300ControlSnapshot(); err != nil {
 +		return err
 +	}
@@ -4735,10 +4801,10 @@ index 0000000..59971e5
 +}
 diff --git a/module/module-agent/mu300_resolve_test.go b/module/module-agent/mu300_resolve_test.go
 new file mode 100644
-index 0000000..fbbd1d8
+index 0000000..cb34c3c
 --- /dev/null
 +++ b/module/module-agent/mu300_resolve_test.go
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,146 @@
 +package main
 +
 +import (
@@ -4791,7 +4857,11 @@ index 0000000..fbbd1d8
 +			case "old-generation":
 +				generation = "6"
 +			case "restart":
-+				a.push = newPushManager(t.TempDir() + "/push.json")
++				// Simulate lost in-memory push identity under its lock. Replacing
++				// the manager races outstanding call-notification goroutines.
++				a.push.mu.Lock()
++				a.push.lastCallID, a.push.lastUUID, a.push.lastGeneration = "", "", 0
++				a.push.mu.Unlock()
 +			case "missing":
 +				state = "OK"
 +			case "slot-reuse":
@@ -6603,8 +6673,339 @@ index 0000000..653f3c3
 +	}
 +	return ended
 +}
+diff --git a/module/module-agent/mu300_watch.go b/module/module-agent/mu300_watch.go
+new file mode 100644
+index 0000000..c08a0aa
+--- /dev/null
++++ b/module/module-agent/mu300_watch.go
+@@ -0,0 +1,179 @@
++package main
++
++import (
++	"encoding/json"
++	"io"
++	"net"
++	"net/http"
++	"strings"
++	"time"
++)
++
++type watchIdentity struct {
++	AgentID    string `json:"agent_id"`
++	CallID     string `json:"call_id"`
++	CallUUID   string `json:"call_uuid"`
++	Generation uint64 `json:"generation"`
++}
++type watchBinding struct {
++	Instance, Owner string
++	Until           time.Time
++	HangupAttempted bool
++	Notified        string
++}
++
++func (a *agent) mu300Watch(w http.ResponseWriter, r *http.Request) {
++	host, _, err := net.SplitHostPort(r.RemoteAddr)
++	action := strings.TrimPrefix(r.URL.Path, "/internal/watch/")
++	if err != nil || !net.ParseIP(host).IsLoopback() || a.profile.Name != "mu300-openwrt" {
++		http.Error(w, "loopback only", 403)
++		return
++	}
++	if r.Method != "POST" || (action != "status" && action != "check" && action != "answer" && action != "hangup") {
++		http.NotFound(w, r)
++		return
++	}
++	var id watchIdentity
++	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
++	dec.DisallowUnknownFields()
++	err = dec.Decode(&id)
++	var extra any
++	owner, oe := mu300RequestOwner(r)
++	if err != nil || dec.Decode(&extra) != io.EOF || oe != nil || owner == "local" || !mu300ValidIdentity(id.AgentID) || !mu300ValidIdentity(id.CallID) || !mu300PushUUID.MatchString(id.CallUUID) || id.Generation == 0 || id.Generation > 1<<63-1 {
++		http.Error(w, "identity", 400)
++		return
++	}
++	// Media validation reads a bounded-fresh snapshot without contending with
++	// the periodic AT poll. Control still serializes with every native mutation.
++	if action == "check" {
++		if !a.mu300WatchMu.TryLock() {
++			http.Error(w, "busy", 409)
++			return
++		}
++	} else {
++		a.mu300CallMu.Lock()
++		defer a.mu300CallMu.Unlock()
++		if r.Context().Err() != nil {
++			return
++		}
++		if a.mu300ControlSnapshot() != nil {
++			http.Error(w, "unconfirmed", 409)
++			return
++		}
++		a.mu300WatchMu.Lock()
++	}
++	defer a.mu300WatchMu.Unlock()
++	if r.Context().Err() != nil {
++		return
++	}
++	now := time.Now()
++	if a.mu300WatchBindings == nil {
++		a.mu300WatchBindings = map[watchIdentity]*watchBinding{}
++	}
++	for k, v := range a.mu300WatchBindings {
++		if !now.Before(v.Until) {
++			delete(a.mu300WatchBindings, k)
++		}
++	}
++	binding := a.mu300WatchBindings[id]
++	if binding == nil {
++		if action == "check" || a.push == nil {
++			http.Error(w, "unknown", 409)
++			return
++		}
++		a.push.mu.Lock()
++		matches := a.push.lastCallID == id.CallID && a.push.lastUUID == id.CallUUID && a.push.lastGeneration == id.Generation
++		a.push.mu.Unlock()
++		if !matches || len(a.mu300WatchBindings) >= 64 {
++			http.Error(w, "unknown", 409)
++			return
++		}
++		c, _, e := a.mu300Target(id.CallID)
++		if e != nil || c.Direction != "incoming" {
++			http.Error(w, "unknown", 409)
++			return
++		}
++		for oldID, old := range a.mu300WatchBindings {
++			if old.Instance == c.ID && oldID != id {
++				http.Error(w, "instance already bound", 409)
++				return
++			}
++		}
++		binding = &watchBinding{Instance: c.ID, Until: now.Add(4 * time.Hour)}
++		a.mu300WatchBindings[id] = binding
++	}
++	state := a.mu300WatchState(binding.Instance)
++	if action == "answer" {
++		if binding.Owner != "" && binding.Owner != owner {
++			http.Error(w, "owned", 409)
++			return
++		}
++		if binding.Owner == "" {
++			if state != "incoming" {
++				http.Error(w, "not ringing", 409)
++				return
++			}
++			// Same call mutex used by iPhone/cloud control: only first ringing answer
++			// can acquire ownership. Keep claim even if the command outcome is unknown.
++			binding.Owner = owner
++			_ = a.mu300ControlLocked("answer", binding.Instance, "")
++			state = a.mu300WatchState(binding.Instance)
++		}
++	}
++	if action == "hangup" {
++		if binding.Owner != owner {
++			http.Error(w, "not owner", 403)
++			return
++		}
++		if !binding.HangupAttempted && state != "ended" && state != "unknown" {
++			binding.HangupAttempted = true
++			_ = a.mu300ControlLocked("hangup", binding.Instance, "")
++			state = a.mu300WatchState(binding.Instance)
++		}
++	}
++	if binding.Owner != "" && binding.Owner != owner {
++		http.Error(w, "owned", 403)
++		return
++	}
++	if binding.Owner == owner && state == "incoming" {
++		state = "connecting"
++	}
++	if binding.Owner == owner && (state == "active" || state == "ended") && binding.Notified != state && a.push != nil {
++		binding.Notified = state
++		go func(identity watchIdentity, phase string) {
++			_ = a.push.sendCallOwner(identity.CallID, identity.CallUUID, identity.Generation, "watch", phase)
++		}(id, state)
++	}
++	writeJSON(w, 200, map[string]any{"state": state, "instance": binding.Instance, "owned": binding.Owner == owner})
++}
++func (a *agent) mu300WatchState(instance string) string {
++	a.mu.RLock()
++	defer a.mu.RUnlock()
++	age := time.Since(a.mu300EarlyPollAt)
++	if a.mu300EarlyPollAt.IsZero() || age < 0 || age > 2500*time.Millisecond {
++		return "unknown"
++	}
++	for _, c := range a.mu300Calls {
++		if c.ID != instance {
++			continue
++		}
++		if c.Direction != "incoming" || !a.mu300GoneSince[c.ID].IsZero() {
++			return "unknown"
++		}
++		switch c.State {
++		case "incoming", "waiting":
++			return "incoming"
++		case "active", "held":
++			return c.State
++		}
++		return "unknown"
++	}
++	// Only a previously verified immutable instance with confirmed terminal
++	// history is ended. An unrelated active call or failed lookup is not proof.
++	for _, c := range a.calls.History {
++		if c.ID == instance && c.EndedAt != nil {
++			return "ended"
++		}
++	}
++	return "unknown"
++}
+diff --git a/module/module-agent/mu300_watch_test.go b/module/module-agent/mu300_watch_test.go
+new file mode 100644
+index 0000000..cdf375f
+--- /dev/null
++++ b/module/module-agent/mu300_watch_test.go
+@@ -0,0 +1,140 @@
++package main
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++func watchCall(a *agent, action, owner string, id watchIdentity) *httptest.ResponseRecorder {
++	raw, _ := json.Marshal(id)
++	r := httptest.NewRequest("POST", "/internal/watch/"+action, strings.NewReader(string(raw)))
++	r.RemoteAddr = "127.0.0.1:5000"
++	r.Header.Set(mu300OwnerHeader, owner)
++	w := httptest.NewRecorder()
++	a.mu300Watch(w, r)
++	return w
++}
++func TestWatchIncomingClaimAndTerminalIdentity(t *testing.T) {
++	for _, scenario := range []string{"normal", "other-owner", "iphone-first", "generation", "uncertain", "outgoing", "held"} {
++		t.Run(scenario, func(t *testing.T) {
++			var mu sync.Mutex
++			state := "+CLCC: 1,1,4,0,0\nOK"
++			answers := 0
++			hangups := 0
++			a := testMU300Calls(t, func(cmd string, _ time.Duration) (string, error) {
++				mu.Lock()
++				defer mu.Unlock()
++				switch cmd {
++				case "AT+CLCC":
++					return state, nil
++				case "ATA":
++					answers++
++					if scenario != "uncertain" {
++						state = "+CLCC: 1,1,0,0,0\nOK"
++					}
++					return "OK", nil
++				case "AT+CHUP":
++					hangups++
++					state = "OK"
++					return "OK", nil
++				default:
++					return "", fmt.Errorf("unexpected mutation %s", cmd)
++				}
++			})
++			a.applyCallPoll(parseCLCC(state), time.Now())
++			id := watchIdentity{"fixture-agent", a.calls.Active.ID, resolveTestUUID, 7}
++			a.push.mu.Lock()
++			a.push.lastCallID, a.push.lastUUID, a.push.lastGeneration = id.CallID, id.CallUUID, id.Generation
++			a.push.mu.Unlock()
++			owner := "wlan:" + strings.Repeat("a", 64)
++			other := "wlan:" + strings.Repeat("b", 64)
++			switch scenario {
++			case "iphone-first":
++				state = "+CLCC: 1,1,0,0,0\nOK"
++			case "held":
++				state = "+CLCC: 1,1,1,0,0\nOK"
++			case "generation":
++				id.Generation = 8
++			case "outgoing":
++				state = "+CLCC: 1,0,2,0,0\nOK"
++			}
++			w := watchCall(a, "answer", owner, id)
++			if scenario == "iphone-first" || scenario == "held" || scenario == "generation" || scenario == "outgoing" {
++				if w.Code == 200 || answers != 0 {
++					t.Fatal("unsafe answer", w.Code, answers)
++				}
++				return
++			}
++			if w.Code != 200 || answers != 1 {
++				t.Fatal(w.Code, w.Body.String(), answers)
++			}
++			w = watchCall(a, "answer", owner, id)
++			if w.Code != 200 || answers != 1 {
++				t.Fatal("duplicate answer", w.Code, answers)
++			}
++			if scenario == "uncertain" {
++				if !strings.Contains(w.Body.String(), "connecting") {
++					t.Fatal("ACK became active", w.Body.String())
++				}
++				return
++			}
++			if scenario == "other-owner" {
++				if watchCall(a, "answer", other, id).Code == 200 || watchCall(a, "hangup", other, id).Code == 200 || hangups != 0 {
++					t.Fatal("owner stolen")
++				}
++				return
++			}
++			w = watchCall(a, "hangup", owner, id)
++			if w.Code != 200 || hangups != 1 || !strings.Contains(w.Body.String(), "ended") {
++				t.Fatal(w.Code, w.Body.String(), hangups)
++			}
++			// A new call and changed push generation cannot replace the bound native UUID.
++			state = "+CLCC: 1,1,4,0,0\nOK"
++			a.push.mu.Lock()
++			a.push.lastCallID = "next-call"
++			a.push.lastGeneration = 8
++			a.push.mu.Unlock()
++			w = watchCall(a, "status", owner, id)
++			if w.Code != 200 || !strings.Contains(w.Body.String(), "ended") {
++				t.Fatal("lost terminal tuple", w.Code, w.Body.String())
++			}
++			if watchCall(a, "answer", owner, id).Code != 200 || answers != 1 {
++				t.Fatal("terminal retry caused answer")
++			}
++		})
++	}
++}
++func TestWatchCheckRejectsStaleOrBusySnapshot(t *testing.T) {
++	a := testMU300Calls(t, func(string, time.Duration) (string, error) { return "+CLCC: 1,1,4,0,0\nOK", nil })
++	a.applyCallPoll(parseCLCC("+CLCC: 1,1,4,0,0\nOK"), time.Now())
++	id := watchIdentity{"fixture", a.calls.Active.ID, resolveTestUUID, 7}
++	owner := "wlan:" + strings.Repeat("a", 64)
++	a.mu300WatchBindings = map[watchIdentity]*watchBinding{id: {Instance: id.CallID, Owner: owner, Until: time.Now().Add(time.Hour)}}
++	w := watchCall(a, "check", owner, id)
++	if w.Code != 200 || !strings.Contains(w.Body.String(), "unknown") {
++		t.Fatal("stale snapshot", w.Code, w.Body.String())
++	}
++	a.mu300WatchMu.Lock()
++	w = watchCall(a, "check", owner, id)
++	a.mu300WatchMu.Unlock()
++	if w.Code != 409 {
++		t.Fatal("check waited behind modem")
++	}
++	wrong := id
++	wrong.Generation++
++	if watchCall(a, "check", owner, wrong).Code != 409 {
++		t.Fatal("unbound generation")
++	}
++}
++func TestCallOwnerRejectsMissingGeneration(t *testing.T) {
++	p := newPushManager(t.TempDir() + "/push.json")
++	p.lastGeneration = 8
++	if p.sendCallOwner("call", resolveTestUUID, 0, "watch", "ended") == nil {
++		t.Fatal("missing generation borrowed global")
++	}
++}
 diff --git a/module/module-agent/push.go b/module/module-agent/push.go
-index dabc119..7ad67a2 100644
+index dabc119..68787cc 100644
 --- a/module/module-agent/push.go
 +++ b/module/module-agent/push.go
 @@ -33,6 +33,7 @@ type pushRegistration struct {
@@ -6767,7 +7168,26 @@ index dabc119..7ad67a2 100644
  		Timestamp: message.Timestamp.UTC().Format(time.RFC3339Nano),
  	}
  	err := p.postJSON(client, registration.RelayURL+"/v1/events/sms", payload)
-@@ -698,17 +714,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
+@@ -626,8 +642,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+ 	return true, nil
+ }
+ 
+-func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error {
+-	if callID == "" || callUUID == "" ||
++func (p *pushManager) sendCallOwner(callID, callUUID string, generation uint64, owner, phase string) error {
++	if callID == "" || callUUID == "" || generation == 0 ||
+ 		(owner != "watch" && owner != "iphone") ||
+ 		(phase != "active" && phase != "ended") {
+ 		return errors.New("通话所有权事件无效")
+@@ -636,7 +652,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
+ 	registration := p.config
+ 	client := p.client
+ 	cloudEnabled := p.cloudEnabledLocked()
+-	generation := p.lastGeneration
+ 	p.mu.Unlock()
+ 	if !cloudEnabled || registration.RelayURL == "" || registration.AlertToken == "" {
+ 		return nil
+@@ -698,17 +713,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
  	if !cloudEnabled || registration.RelayURL == "" {
  		return nil
  	}
@@ -6792,6 +7212,24 @@ index dabc119..7ad67a2 100644
  	})
  }
  
+diff --git a/module/module-agent/push_test.go b/module/module-agent/push_test.go
+index aa500fc..12227ea 100644
+--- a/module/module-agent/push_test.go
++++ b/module/module-agent/push_test.go
+@@ -380,10 +380,11 @@ func TestCallOwnershipPreservesAuthenticatedIPhoneOwner(t *testing.T) {
+ 	if err := manager.store(testPushRegistration(server.URL)); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if err := manager.sendCallOwner("call-9", "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", "iphone", "active"); err != nil {
++	manager.lastCallID, manager.lastUUID, manager.lastGeneration = "newer-call", "00000000-0000-0000-0000-000000000000", 10
++	if err := manager.sendCallOwner("call-9", "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", 9, "iphone", "active"); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if received.Owner != "iphone" || received.Phase != "active" || received.DeviceSecret == "" {
++	if received.Generation != 9 || received.CallID != "call-9" || received.Owner != "iphone" || received.Phase != "active" || received.DeviceSecret == "" {
+ 		t.Fatalf("所有权载荷错误: %#v", received)
+ 	}
+ }
 diff --git a/module/module-agent/runtime_profile.go b/module/module-agent/runtime_profile.go
 index ed8cb50..5974005 100644
 --- a/module/module-agent/runtime_profile.go
