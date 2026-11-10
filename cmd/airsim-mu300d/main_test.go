@@ -12,7 +12,7 @@ import (
 
 func TestCurrentIOSRegistrationAdapter(t *testing.T) {
 	var reg map[string]any
-	if e := json.Unmarshal([]byte(`{"device_id":"fixture-device","device_secret":"fixture-secret","voip_token":"fixture-token","relay_url":"https://example.test","vowlan_secret":"local-gateway-secret","notification_forwarding":{"enabled":true}}`), &reg); e != nil {
+	if e := json.Unmarshal([]byte(`{"device_id":"fixture-device","device_secret":"fixture-secret","voip_token":"fixture-token","relay_url":"https://example.test","android_agent_id":"untrusted-client-default","vowlan_secret":"local-gateway-secret","notification_forwarding":{"enabled":true}}`), &reg); e != nil {
 		t.Fatal(e)
 	}
 	prepareRegistration(reg, "mu300-fixture")

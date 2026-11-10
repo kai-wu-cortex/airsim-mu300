@@ -5520,6 +5520,119 @@ index 0000000..5b1a8e1
 +		t.Fatalf("slot delivery: %v %v %q", sent, err, received.SIMSlot)
 +	}
 +}
+diff --git a/module/module-agent/mu300_sms_identity_test.go b/module/module-agent/mu300_sms_identity_test.go
+new file mode 100644
+index 0000000..54db0f6
+--- /dev/null
++++ b/module/module-agent/mu300_sms_identity_test.go
+@@ -0,0 +1,107 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestMU300SMSProducerIdentitySurvivesAutomaticRegistrationAndRecovery(t *testing.T) {
++	received := make(chan map[string]any, 8)
++	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v1/events/sms" {
++			t.Error("wrong endpoint")
++		}
++		var body map[string]any
++		if e := json.NewDecoder(r.Body).Decode(&body); e != nil {
++			t.Error(e)
++		}
++		received <- body
++		w.WriteHeader(http.StatusAccepted)
++	}))
++	defer server.Close()
++	for _, pairedID := range []string{"mu300-fixture-A", "mu300-fixture-B"} {
++		t.Run(pairedID, func(t *testing.T) {
++			path := filepath.Join(t.TempDir(), "push.json")
++			manager := newPushManager(path)
++			reg := testPushRegistration(server.URL)
++			reg.AndroidAgentID = pairedID
++			reg.AndroidAgentKind = "mu300"
++			if e := manager.store(reg); e != nil {
++				t.Fatal(e)
++			}
++			reg.AndroidAgentID = ""
++			for n := 0; n < 3; n++ {
++				if e := manager.store(reg); e != nil {
++					t.Fatal(e)
++				}
++			}
++			for _, name := range []string{path, path + ".last-good"} {
++				raw, e := os.ReadFile(name)
++				if e != nil {
++					t.Fatal(e)
++				}
++				var saved pushRegistration
++				if json.Unmarshal(raw, &saved) != nil || saved.AndroidAgentID != pairedID {
++					t.Fatal("persisted identity changed")
++				}
++			}
++			if e := os.WriteFile(path, []byte("broken"), 0600); e != nil {
++				t.Fatal(e)
++			}
++			manager = newPushManager(path)
++			manager.client = server.Client()
++			message := smsMessage{Sender: "fixture-sender", Content: "fixture-body", SIMSlot: "SIM 1", DeliveryID: "same-fixture-delivery", Timestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
++			if sent, e := manager.sendSMS(message); e != nil || !sent {
++				t.Fatal("send", sent, e)
++			}
++			body := <-received
++			for key, want := range map[string]string{"agent_id": pairedID, "delivery_id": message.DeliveryID, "content": message.Content, "sender": message.Sender, "sim_slot": message.SIMSlot, "event": "incoming_sms"} {
++				if body[key] != want {
++					t.Fatalf("wire field %s changed", key)
++				}
++			}
++			if sent, e := manager.sendSMS(message); e != nil || sent {
++				t.Fatal("same-manager dedup changed", sent, e)
++			}
++			select {
++			case <-received:
++				t.Fatal("duplicate delivery")
++			default:
++			}
++			replacement := reg
++			replacement.AndroidAgentID = pairedID + "-replacement"
++			if e := manager.store(replacement); e != nil {
++				t.Fatal(e)
++			}
++			manager = newPushManager(path)
++			manager.client = server.Client()
++			message.DeliveryID = "new-fixture-delivery"
++			if sent, e := manager.sendSMS(message); e != nil || !sent {
++				t.Fatal("replacement send", sent, e)
++			}
++			if body := <-received; body["agent_id"] != replacement.AndroidAgentID {
++				t.Fatal("explicit identity replacement ignored")
++			}
++		})
++	}
++}
++
++func TestSMSRegistrationNeverInventsProducerIdentity(t *testing.T) {
++	manager := newPushManager(filepath.Join(t.TempDir(), "push.json"))
++	reg := testPushRegistration("https://push.example.com")
++	reg.AndroidAgentID = ""
++	if e := manager.store(reg); e != nil {
++		t.Fatal(e)
++	}
++	if manager.config.AndroidAgentID != "" {
++		t.Fatal("fabricated identity")
++	}
++	if recovered := newPushManager(manager.configPath); recovered.config.AndroidAgentID != "" {
++		t.Fatal("fabricated identity on restart")
++	}
++}
 diff --git a/module/module-agent/mu300_sms_test.go b/module/module-agent/mu300_sms_test.go
 new file mode 100644
 index 0000000..fac4f68
@@ -7005,7 +7118,7 @@ index 0000000..cdf375f
 +	}
 +}
 diff --git a/module/module-agent/push.go b/module/module-agent/push.go
-index dabc119..68787cc 100644
+index dabc119..c28e261 100644
 --- a/module/module-agent/push.go
 +++ b/module/module-agent/push.go
 @@ -33,6 +33,7 @@ type pushRegistration struct {
@@ -7047,15 +7160,16 @@ index dabc119..68787cc 100644
  }
  
  type incomingPushEvent struct {
-@@ -79,6 +82,7 @@ type incomingPushEvent struct {
+@@ -79,6 +82,8 @@ type incomingPushEvent struct {
  }
  
  type incomingSMSPushEvent struct {
++	AgentID      string `json:"agent_id"`
 +	SIMSlot      string `json:"sim_slot,omitempty"`
  	Event        string `json:"event"`
  	DeviceID     string `json:"device_id"`
  	DeviceSecret string `json:"device_secret"`
-@@ -115,6 +119,8 @@ type callStatePushEvent struct {
+@@ -115,6 +120,8 @@ type callStatePushEvent struct {
  }
  
  type agentHeartbeatSnapshot struct {
@@ -7064,7 +7178,7 @@ index dabc119..68787cc 100644
  	ATOK                 bool
  	CellularState        string
  	CellularRegistration string
-@@ -124,23 +130,24 @@ type agentHeartbeatSnapshot struct {
+@@ -124,23 +131,24 @@ type agentHeartbeatSnapshot struct {
  }
  
  type agentHeartbeatEvent struct {
@@ -7106,7 +7220,23 @@ index dabc119..68787cc 100644
  }
  
  type pushManager struct {
-@@ -441,6 +448,9 @@ func syncPushConfigDirectory(path string) error {
+@@ -339,6 +347,15 @@ func validatePushRegistration(registration pushRegistration) error {
+ }
+ 
+ func (p *pushManager) store(registration pushRegistration) error {
++	p.mu.Lock()
++	pairedAgentID := p.config.AndroidAgentID
++	p.mu.Unlock()
++	if registration.AndroidAgentID == "" {
++		// Automatic registration omits the identity supplied by the authenticated
++		// pairing gateway. Inherit it before writing BOTH durable config copies.
++		registration.AndroidAgentID = pairedAgentID
++	}
++
+ 	registration.DeviceID = strings.TrimSpace(registration.DeviceID)
+ 	registration.BundleID = strings.TrimSpace(registration.BundleID)
+ 	registration.RelayURL = strings.TrimRight(strings.TrimSpace(registration.RelayURL), "/")
+@@ -441,6 +458,9 @@ func syncPushConfigDirectory(path string) error {
  }
  
  func (p *pushManager) cloudEnabledLocked() bool {
@@ -7116,7 +7246,7 @@ index dabc119..68787cc 100644
  	if p.config.LocalMode {
  		return false
  	}
-@@ -464,17 +474,19 @@ func (p *pushManager) status() pushStatus {
+@@ -464,17 +484,19 @@ func (p *pushManager) status() pushStatus {
  	cloudEnabled := p.cloudEnabledLocked()
  	baseReady := cloudEnabled && p.config.DeviceID != "" && p.config.RelayURL != ""
  	return pushStatus{
@@ -7147,7 +7277,7 @@ index dabc119..68787cc 100644
  	}
  }
  
-@@ -482,7 +494,11 @@ func (p *pushManager) sendRegistration() error {
+@@ -482,7 +504,11 @@ func (p *pushManager) sendRegistration() error {
  	p.mu.Lock()
  	registration := p.config
  	client := p.client
@@ -7159,16 +7289,20 @@ index dabc119..68787cc 100644
  	if registration.CloudEnabled != nil && !*registration.CloudEnabled {
  		return nil
  	}
-@@ -603,7 +619,7 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+@@ -601,9 +627,10 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+ 	p.mu.Unlock()
+ 
  	payload := incomingSMSPushEvent{
- 		Event: "incoming_sms", DeviceID: registration.DeviceID,
+-		Event: "incoming_sms", DeviceID: registration.DeviceID,
++		AgentID: registration.AndroidAgentID,
++		Event:   "incoming_sms", DeviceID: registration.DeviceID,
  		DeviceSecret: registration.DeviceSecret, DeliveryID: message.DeliveryID,
 -		Sender: message.Sender, Content: message.Content, Code: message.Code,
 +		Sender: message.Sender, Content: message.Content, Code: message.Code, SIMSlot: message.SIMSlot,
  		Timestamp: message.Timestamp.UTC().Format(time.RFC3339Nano),
  	}
  	err := p.postJSON(client, registration.RelayURL+"/v1/events/sms", payload)
-@@ -626,8 +642,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+@@ -626,8 +653,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
  	return true, nil
  }
  
@@ -7179,7 +7313,7 @@ index dabc119..68787cc 100644
  		(owner != "watch" && owner != "iphone") ||
  		(phase != "active" && phase != "ended") {
  		return errors.New("通话所有权事件无效")
-@@ -636,7 +652,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
+@@ -636,7 +663,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
  	registration := p.config
  	client := p.client
  	cloudEnabled := p.cloudEnabledLocked()
@@ -7187,7 +7321,7 @@ index dabc119..68787cc 100644
  	p.mu.Unlock()
  	if !cloudEnabled || registration.RelayURL == "" || registration.AlertToken == "" {
  		return nil
-@@ -698,17 +713,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
+@@ -698,17 +724,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
  	if !cloudEnabled || registration.RelayURL == "" {
  		return nil
  	}
@@ -7213,7 +7347,7 @@ index dabc119..68787cc 100644
  }
  
 diff --git a/module/module-agent/push_test.go b/module/module-agent/push_test.go
-index aa500fc..12227ea 100644
+index aa500fc..9284db5 100644
 --- a/module/module-agent/push_test.go
 +++ b/module/module-agent/push_test.go
 @@ -380,10 +380,11 @@ func TestCallOwnershipPreservesAuthenticatedIPhoneOwner(t *testing.T) {
@@ -7230,6 +7364,92 @@ index aa500fc..12227ea 100644
  		t.Fatalf("所有权载荷错误: %#v", received)
  	}
  }
+@@ -417,12 +418,12 @@ func TestPushManagerSendsActivityStateWithOriginalCallUUID(t *testing.T) {
+ }
+ 
+ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
+-	var received []incomingSMSPushEvent
++	var received []map[string]any
+ 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+ 		if request.URL.Path != "/v1/events/sms" {
+ 			t.Fatalf("请求路径=%q", request.URL.Path)
+ 		}
+-		var value incomingSMSPushEvent
++		var value map[string]any
+ 		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
+ 			t.Fatal(err)
+ 		}
+@@ -436,6 +437,12 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
+ 	if err := manager.store(testPushRegistration(server.URL)); err != nil {
+ 		t.Fatal(err)
+ 	}
++	// iOS automatic re-registration does not repeat Android's pairing identity.
++	automatic := testPushRegistration(server.URL)
++	automatic.AndroidAgentID = ""
++	if err := manager.store(automatic); err != nil {
++		t.Fatal(err)
++	}
+ 	message := smsMessage{
+ 		Sender: "10010", Content: "余额提醒", Timestamp: time.Now(), DeliveryID: "SM-7-test",
+ 	}
+@@ -445,9 +452,12 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
+ 	if sent, err := manager.sendSMS(message); err != nil || sent {
+ 		t.Fatalf("重复短信不应再次发送: sent=%v err=%v", sent, err)
+ 	}
+-	if len(received) != 1 || received[0].DeliveryID != message.DeliveryID || received[0].Content != message.Content {
++	if len(received) != 1 || received[0]["delivery_id"] != message.DeliveryID || received[0]["content"] != message.Content {
+ 		t.Fatalf("短信中继载荷错误: %#v", received)
+ 	}
++	if received[0]["agent_id"] != "android-test" {
++		t.Fatalf("短信中继缺少 Android Agent 身份: %#v", received)
++	}
+ }
+ 
+ func TestAgentHeartbeatReportsCellularStateWithoutSecrets(t *testing.T) {
+@@ -523,3 +533,43 @@ func TestNonRingingCallsNeverProduceVoIPPush(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestSMSAgentIdentitySurvivesReregistrationAndRecovery(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "push.json")
++	manager := newPushManager(path)
++	registration := testPushRegistration("https://push.example.com")
++	if err := manager.store(registration); err != nil {
++		t.Fatal(err)
++	}
++	registration.AndroidAgentID = ""
++	if err := manager.store(registration); err != nil {
++		t.Fatal(err)
++	}
++	for _, name := range []string{path, path + ".last-good"} {
++		data, err := os.ReadFile(name)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var saved pushRegistration
++		if err := json.Unmarshal(data, &saved); err != nil {
++			t.Fatal(err)
++		}
++		if saved.AndroidAgentID != "android-test" {
++			t.Fatalf("identity lost in %s", name)
++		}
++	}
++	if err := os.WriteFile(path, []byte("broken"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	recovered := newPushManager(path)
++	if recovered.config.AndroidAgentID != "android-test" {
++		t.Fatal("backup lost identity")
++	}
++	registration.AndroidAgentID = "explicit-new-agent"
++	if err := recovered.store(registration); err != nil {
++		t.Fatal(err)
++	}
++	if newPushManager(path).config.AndroidAgentID != "explicit-new-agent" {
++		t.Fatal("explicit replacement was ignored")
++	}
++}
 diff --git a/module/module-agent/runtime_profile.go b/module/module-agent/runtime_profile.go
 index ed8cb50..5974005 100644
 --- a/module/module-agent/runtime_profile.go
