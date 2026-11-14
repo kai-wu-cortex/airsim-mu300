@@ -1,8 +1,8 @@
-# AirSIM for MU300 一体部署手册（R23 开发预览）
+# AirSIM for MU300 一体部署手册（R25 开发预览）
 
-> R23 新增 Tailscale 手动配对和云端接收缓冲，自动化测试已通过，新功能和完整 APK 尚未实机验收。详见 [R23 说明](RELEASE_v0.1.0-r23.md)、[Tailscale 步骤](TAILSCALE_PAIRING.md) 和 [缓冲设置](CLOUD_AUDIO_BUFFER.md)。
+> R25 提供新版 LuCI、上下行音量增益、配对码时钟修复和受保护的 7.3 手动切换入口；保留 Tailscale 与云端缓冲。候选已在 U30 Air 安装并完成基础检查，完整通话和新功能验收仍待完成。详见 [R25 说明](RELEASE_v0.1.0-r25.md)。
 
-> **客户端兼容：** 云端接通前公告需要发送 `early_media_version: 1` 并识别 `early_media_ready_v1` 的新版 AirSIM。未协商的旧客户端只等待正常接通后双向音频；请先更新客户端。R23 是开发预览版，开启预览频道后 R22 用户可检查更新或使用下方安装脚本升级。
+> **客户端兼容：** 云端接通前公告需要发送 `early_media_version: 1` 并识别 `early_media_ready_v1` 的新版 AirSIM。未协商的旧客户端只等待正常接通后双向音频；请先更新客户端。R25 是开发预览版，开启预览频道后 R22 用户可检查更新或使用下方安装脚本升级。
 
 > [!WARNING]
 > 当前一体包只覆盖已验证 U30 Air 的 `5.4.254-gb50db5b6224c` 内核及配置 `1057cb97e0d2d7f26816e8bf7841faac1153833a01d4893cdc196b75ae6356b3`。F50 / 7.2.8 不在适用范围。R17 在 U30 Air 上的升级、重启自动准备及两通双向通话验收已通过，长通话仍未完整验收。
@@ -15,7 +15,7 @@
 
 ## 一次安装
 
-本手册安装 R23 开发预览版。原通话确认结束后，可用新操作立即拨打同一号码，同一操作 ID 重试不会再次拨出；仍需满足实际通话空闲条件，见 [说明](R18_REDIAL.md)。发布边界见 [R23 说明](RELEASE_v0.1.0-r23.md)。
+本手册安装 R25 开发预览版。原通话确认结束后，可用新操作立即拨打同一号码，同一操作 ID 重试不会再次拨出；仍需满足实际通话空闲条件，见 [说明](R18_REDIAL.md)。发布边界见 [R25 说明](RELEASE_v0.1.0-r25.md)。
 
 先结束通话及短信任务，保存已有配置和可信回退包。软件包是 OpenWrt APK v3，不是 Android APK。
 
@@ -23,7 +23,7 @@
 
 ```sh
 cd /tmp
-wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r23/install.sh
+wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r25/install.sh
 cat airsim-install.sh
 sh airsim-install.sh --check
 sh airsim-install.sh --install
@@ -33,7 +33,7 @@ sh airsim-install.sh --install
 
 ## LuCI 手动上传
 
-从同一 Release 获取 `luci-app-airsim-0.1.0-r23.apk`、`airsim-dev.pem` 和校验清单。核对公钥 SHA-256 `0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de` 并导入公钥，验证 APK 后上传安装，不忽略签名或依赖。APK 钩子会执行同样的音频准备检查；必须以安装结果和 LuCI 准备状态判断是否完成，不能只看软件包出现在列表中。
+从同一 Release 获取 `luci-app-airsim-0.1.0-r25.apk`、`airsim-dev.pem` 和校验清单。核对公钥 SHA-256 `0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de` 并导入公钥，验证 APK 后上传安装，不忽略签名或依赖。APK 钩子会执行同样的音频准备检查；必须以安装结果和 LuCI 准备状态判断是否完成，不能只看软件包出现在列表中。
 
 ## 看安装结果
 
@@ -47,7 +47,13 @@ sh airsim-install.sh --install
 
 配对完成后，由用户手动测试双向声音并挂断。安装成功、声卡存在或帧数增长都不能替代这项验收。
 
+## 通话音量
+
+在 **外观与设置 → 通话音量** 调节，默认上下行均为 0 dB。先结束通话、关闭服务，保存后再启动。AirSIM 用户听对方偏小时，只调高“我听对方（下行）”，可先试 +3 dB；“对方听我”保持 0 dB。增益过高可能增加底噪或失真，详见 [PCM 增益](PCM_GAIN.md)。
+
 ## 再次配对
+
+R25 的管理页按设备返回的剩余时间显示验证码，避免设备与浏览器时钟不同造成有效码被隐藏；这不改变客户端签名或配对有效期校验。
 
 保持 iPhone 所需的云模式或本地模式，在 LuCI → 服务 → AirSIM 获取新验证码后配对。再次配对时重新获取验证码；不需要为了绕过兼容问题切换到本地模式。配对成功与云推送是否就绪是不同状态，云端设置和权限不会被配对操作强行开启。原有配对记录保留；仍有 16 个客户端名额上限，本版不自动清除历史记录。
 
@@ -77,3 +83,14 @@ U30 Air 通过原有认证健康响应和心跳上报电量，AirSIM 已有兼�
 回退到 R22 或更早版本前，先关闭插件、清空 Tailscale 接口并保存，避免旧版拒绝新增配置字段。
 
 结束通话后使用与原设备兼容的可信包恢复插件，保留配对和配置。首次音频安装会保存原脚本、链接与启动项；音频回退按 [恢复指南](../packaging/openwrt-audio/README.md) 执行，已加载模块需安排重启才会改变。不要跨内核强行安装旧包。
+
+## develop 的内核选择页面
+
+开发分支新增“服务 → AirSIM → 内核与音频”，用于查看运行内核、检查音频扩展资料，并按 5.4 / 6.18 / 7.3 生成手动切换命令。它不会直接切换或重启，不改变当前 Release 的安装边界；6.18、7.3 的音频包尚未引入或在 U30 Air 验收。使用步骤、来源和匹配状态说明见 [内核版本选择](KERNEL_SELECTION.md)。
+
+## develop 设备扩展维护
+
+详见 [功能与兼容边界](DEVELOP_DEVICE_EXTENSIONS.md)。这些开发功能未进入正式 Release。
+修改网络、蓝牙、备份恢复、短信批量操作及音频准备前，需要结束通话并在概览关闭服务。
+耗时任务在后台执行；连接中断后刷新观察，不能因超时重复操作。操作完成后手动启动服务。
+新增内核目录不代表可安装音频驱动；不绕过内核/配置/模块检查。

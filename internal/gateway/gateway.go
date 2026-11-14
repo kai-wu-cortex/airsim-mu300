@@ -26,6 +26,7 @@ type Gateway struct {
 	mu              sync.Mutex
 	path, id        string
 	keys            []string
+	lastUsed        map[string]int64
 	seen            map[string]int64
 	pcm             bool
 	watchBackend    WatchBackend
@@ -165,6 +166,7 @@ func (g *Gateway) authenticate(method, path string, body []byte, ts, nonce, sig 
 		key, _ := decode(encoded)
 		if hmac.Equal([]byte(Sign(key, canonical(method, path, body, ts, nonce))), []byte(sig)) {
 			g.seen[nonce] = now + 61
+			g.touchClientLocked(watchOwner(key), now)
 			return key
 		}
 	}
@@ -205,6 +207,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := r.Header
+	if h.Get("X-AirSIM-VoWLAN-Version") != "1" {
+		g.event("control_auth_rejected")
+		http.Error(w, "authentication required", 401)
+		return
+	}
 	nonce := h.Get("X-AirSIM-VoWLAN-Nonce")
 	key := g.authenticate(r.Method, r.URL.RequestURI(), body, h.Get("X-AirSIM-VoWLAN-Timestamp"), nonce, h.Get("X-AirSIM-VoWLAN-Signature"))
 	if h.Get("X-AirSIM-VoWLAN-Version") != "1" || key == nil {
@@ -388,6 +395,7 @@ func (g *Gateway) ServePCM(ctx context.Context, c net.Conn) {
 		g.event("pcm_auth_rejected")
 		return
 	}
+	owner := watchOwner(key)
 	clear(key)
 	g.event("pcm_authenticated")
 	// Wait for receive-only teardown before opening duplex on the shared DSP.
@@ -404,12 +412,11 @@ func (g *Gateway) ServePCM(ctx context.Context, c net.Conn) {
 		}
 	}
 	g.mu.Lock()
-	if g.pcm {
+	if !g.reserveClientPCMLocked(owner) {
 		g.mu.Unlock()
 		g.event("pcm_busy")
 		return
 	}
-	g.pcm = true
 	g.mu.Unlock()
 	defer func() { g.mu.Lock(); g.pcm = false; g.mu.Unlock() }()
 	upstream, err := net.DialTimeout("tcp", "127.0.0.1:7580", 3*time.Second)

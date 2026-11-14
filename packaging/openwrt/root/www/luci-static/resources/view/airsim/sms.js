@@ -4,13 +4,13 @@
 'require poll';
 
 // Use the firmware's PDU service and its AT lock, never the Agent's text-mode SMS API.
-var listSMS = rpc.declare({ object: 'mu300dash', method: 'sms_list', params: ['page'], expect: {}, reject: true, nobatch: true });
+var listSMS = rpc.declare({ object: 'airsim', method: 'sms_list', params: ['page'], expect: {}, reject: true, nobatch: true });
 var showSMS = rpc.declare({ object: 'mu300dash', method: 'sms_show', params: ['id'], expect: {}, reject: true, nobatch: true });
-var sendSMS = rpc.declare({ object: 'mu300dash', method: 'sms_send', params: ['num', 'text'], expect: {}, reject: true, nobatch: true });
+var sendSMS = rpc.declare({ object: 'airsim', method: 'sms_send', params: ['num', 'text'], expect: {}, reject: true, nobatch: true });
 var getJob = rpc.declare({ object: 'mu300dash', method: 'sms_job', expect: {}, reject: true, nobatch: true });
 
 return baseclass.extend({
- render: function() {
+ render: function(split) {
   var page = 1, pages = 1, loading = false, reading = false, checking = false;
   var sending = false, running = false, jobKnown = false, watching = false, uncertain = false;
   var lastList = 0, signature = '', draft = null, selected = '';
@@ -155,6 +155,7 @@ return baseclass.extend({
   poll.add(function() {
    return Promise.all([checkJob(), Date.now() - lastList >= 10000 ? refreshList() : Promise.resolve()]);
   }, 2);
+  if(split){var compose=root.querySelector('.as-sms-compose');compose.querySelector('h4').remove();compose.classList.add('as-compose-separated');return {inbox:root,compose:E('section',{'class':'as-card as-sms'},[E('h3',{},'发短信'),compose])};}
   return root;
  }
 });

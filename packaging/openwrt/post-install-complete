@@ -1,6 +1,9 @@
 #!/bin/sh
 # Signed candidate APK owns these helpers. Do not start AirSIM before setup.
 set -eu
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
+/usr/lib/airsim/dashboard-setup --install
+/etc/init.d/airsim-device-settings enable
 /etc/init.d/airsim-update enable
 /etc/init.d/airsim-update restart
 /etc/init.d/rpcd restart

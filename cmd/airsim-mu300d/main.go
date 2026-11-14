@@ -49,15 +49,31 @@ type daemon struct {
 func main() {
 	iface := flag.String("interface", "", "legacy trusted LAN interface override")
 	data := flag.String("data", "/mnt/mu300-disk/extra/airsim/data", "persistent private state")
+	prepareService := flag.Bool("prepare-service", false, "prepare audio while holding runtime ownership")
+	deviceJob := flag.String("device-worker", "", "internal maintenance worker")
+	bootDevice := flag.Bool("device-boot", false, "apply saved device preferences")
 	manage := flag.String("manage", "", "rpcd management command")
+	kernel73 := flag.String("kernel-7-3", "", "local SSH only: check or apply a verified U30 kernel bundle")
 	monitorUpdates := flag.Bool("update-monitor", false, "periodically check published plugin versions")
 	updateWorker := flag.String("update-worker", "", "internal detached upgrade worker")
 	runAgent := flag.Bool("run-agent", false, "supervise Agent with MU300 management policy")
 	selfTest := flag.Duration("audio-self-test", 0, "explicit no-call DSP self-test, 1s..30s")
+	downlinkGain := flag.Int("pcm-downlink-gain-db", 0, "PCM gain heard by AirSIM, 0..12 dB")
+	uplinkGain := flag.Int("pcm-uplink-gain-db", 0, "PCM gain heard by the remote party, 0..12 dB")
 	trial := flag.Bool("early-media-trial", false, "explicit 10-minute lab window; separately arm one current call for 60s")
 	trialArm := flag.Bool("early-media-trial-arm", false, "locally authorize only the current owned outgoing call for receive-only trial")
 	trialRevoke := flag.Bool("early-media-trial-revoke", false, "remove the local early-media trial permission")
 	flag.Parse()
+	if *downlinkGain < 0 || *downlinkGain > 12 || *uplinkGain < 0 || *uplinkGain > 12 {
+		log.Fatal("PCM gain must be 0..12 dB in each direction")
+	}
+	if *kernel73 != "" {
+		if err := kernel73CLI(*kernel73, *data, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *trialArm || *trialRevoke {
 		var err error
 		if *trialArm && *trialRevoke {
@@ -89,6 +105,23 @@ func main() {
 		updateMonitor(ctx, *data)
 		return
 	}
+	if *prepareService {
+		if err := prepareDeviceService(*data); err != nil {
+			log.Print("Device preparation could not run; check maintenance or audio state")
+			os.Exit(1)
+		}
+		return
+	}
+	if *deviceJob != "" {
+		deviceWorker(*deviceJob, *data)
+		return
+	}
+	if *bootDevice {
+		if err := deviceBoot(*data); err != nil {
+			log.Print("Saved device preference could not be applied")
+		}
+		return
+	}
 	if *manage != "" {
 		json.NewEncoder(os.Stdout).Encode(managementCommand(*manage, *data))
 		return
@@ -104,6 +137,9 @@ func main() {
 	defer cancel()
 	if *selfTest != 0 {
 		b := &audio.Bridge{}
+		if err := b.ConfigureGain(*downlinkGain, *uplinkGain); err != nil {
+			log.Fatal(err)
+		}
 		if e := b.SelfTest(ctx, *selfTest); e != nil {
 			log.Fatal(e)
 		}
@@ -137,6 +173,9 @@ func main() {
 		log.Fatal(e)
 	}
 	d := &daemon{lan: lan, ifname: settings.Interface, settings: settings, deviceID: id, client: &http.Client{Timeout: 10 * time.Second}}
+	if err := d.bridge.ConfigureGain(*downlinkGain, *uplinkGain); err != nil {
+		log.Fatal(err)
+	}
 	d.gateway, e = gateway.New(filepath.Join(*data, "vowlan-clients.json"), id)
 	if e != nil {
 		log.Fatal(e)
@@ -181,6 +220,8 @@ func main() {
 	// Internal Agent transport only; never registered on the LAN control mux.
 	admin.HandleFunc("/internal/cloud-early-media", d.gateway.ServeCloudEarlyMedia)
 	admin.HandleFunc("/internal/watch/revoke-parent", d.gateway.ServeRevokeParent)
+	admin.HandleFunc("/pair/clients", d.pairClients)
+	admin.HandleFunc("/pair/remove", d.removePairClient)
 	admin.HandleFunc("/pair/start", d.startPair)
 	admin.HandleFunc("/pair/cancel", d.cancelPair)
 	admin.HandleFunc("/number/refresh", d.refreshNumber)
@@ -235,6 +276,7 @@ func main() {
 			}
 		}(endpoint.pcm)
 	}
+	go d.notificationLoop(ctx, *data)
 	log.Printf("MU300 plugin ready; pairing port %d", settings.PairPort)
 	<-ctx.Done()
 	d.closePair("")
@@ -298,8 +340,9 @@ func (d *daemon) status(w http.ResponseWriter, r *http.Request) {
 	}
 	d.mu.Lock()
 	var session any
-	if d.session != nil && d.session.Expires > time.Now().UnixMilli() {
-		session = map[string]any{"code": d.session.Code, "expires_at": d.session.Expires}
+	now := time.Now().UnixMilli()
+	if d.session != nil && d.session.Expires > now {
+		session = map[string]any{"code": d.session.Code, "expires_at": d.session.Expires, "remaining_ms": d.session.Expires - now}
 	}
 	paired := d.paired
 	d.mu.Unlock()
@@ -358,7 +401,7 @@ func (d *daemon) agentGet(path string) map[string]any {
 	}
 	// Only return selected status and this SIM's own number; never credentials.
 	result := map[string]any{}
-	for _, key := range []string{"sim_inserted", "signal_dbm", "reg_status_text", "phone_number", "phone_number_status", "phone_number_updated_at", "configured", "cloud_enabled", "command_connected", "management_blocked", "call_push_ready", "last_error", "relay_url"} {
+	for _, key := range []string{"sim_inserted", "operator", "signal_dbm", "signal_source", "signal_updated_at", "reg_status_text", "phone_number", "phone_number_status", "phone_number_updated_at", "configured", "cloud_enabled", "command_connected", "management_blocked", "call_push_ready", "last_error", "relay_url"} {
 		if value, ok := data[key]; ok {
 			result[key] = value
 		}

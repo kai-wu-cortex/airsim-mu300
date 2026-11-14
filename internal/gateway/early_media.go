@@ -95,6 +95,11 @@ func (g *Gateway) earlyMediaControl(w http.ResponseWriter, r *http.Request, key 
 	}
 	now := time.Now().Unix()
 	g.mu.Lock()
+	if !g.hasClientLocked(watchOwner(key)) {
+		g.mu.Unlock()
+		http.Error(w, "pairing revoked", 403)
+		return
+	}
 	if g.earlyLeases == nil {
 		g.earlyLeases = make(map[string]*earlyLease)
 	}
@@ -139,7 +144,7 @@ func (g *Gateway) earlyLeaseValid(owner, call, session string, issued int64, han
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	l := g.earlyLeases[earlyMapKey(owner, call)]
-	if l == nil || l.sessionID != session || l.expires <= now || l.expires > now+earlyLeaseSeconds {
+	if !g.hasClientLocked(strings.TrimPrefix(owner, "wlan:")) || l == nil || l.sessionID != session || l.expires <= now || l.expires > now+earlyLeaseSeconds {
 		return false
 	}
 	return !handshake || (issued > now && issued <= now+earlyLeaseSeconds && l.issued[issued])
@@ -173,11 +178,10 @@ func (g *Gateway) serveEarlyPCM(parent context.Context, c net.Conn, reader *bufi
 		return
 	}
 	g.mu.Lock()
-	if g.pcm {
+	if !g.reserveClientPCMLocked(strings.TrimPrefix(owner, "wlan:")) {
 		g.mu.Unlock()
 		return
 	}
-	g.pcm = true
 	done := make(chan struct{})
 	g.earlyStreamDone = done
 	g.mu.Unlock()

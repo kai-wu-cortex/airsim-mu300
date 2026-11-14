@@ -18,20 +18,26 @@ import (
 const FrameBytes = 320
 
 type Bridge struct {
-	busy      atomic.Bool
-	RX        atomic.Uint64
-	TX        atomic.Uint64
-	Silence   atomic.Uint64
-	Received  atomic.Uint64
-	Dropped   atomic.Uint64
-	mu        sync.Mutex
-	lastError string
+	busy            atomic.Bool
+	RX              atomic.Uint64
+	TX              atomic.Uint64
+	Silence         atomic.Uint64
+	Received        atomic.Uint64
+	Dropped         atomic.Uint64
+	DownlinkLimited atomic.Uint64
+	UplinkLimited   atomic.Uint64
+	mu              sync.Mutex
+	lastError       string
+	downlinkDB      int
+	uplinkDB        int
 }
 
 func (b *Bridge) Status() map[string]any {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return map[string]any{"active": b.busy.Load(), "uplink_frames": b.RX.Load(), "downlink_frames": b.TX.Load(), "silence_frames": b.Silence.Load(), "received_uplink_frames": b.Received.Load(), "dropped_uplink_frames": b.Dropped.Load(), "last_error": b.lastError}
+	return map[string]any{"active": b.busy.Load(), "uplink_frames": b.RX.Load(), "downlink_frames": b.TX.Load(), "silence_frames": b.Silence.Load(), "received_uplink_frames": b.Received.Load(), "dropped_uplink_frames": b.Dropped.Load(), "last_error": b.lastError,
+		"downlink_gain_db": b.downlinkDB, "uplink_gain_db": b.uplinkDB,
+		"downlink_limited_samples": b.DownlinkLimited.Load(), "uplink_limited_samples": b.UplinkLimited.Load()}
 }
 func (b *Bridge) Handle(ctx context.Context, c net.Conn) {
 	defer c.Close()
@@ -63,6 +69,7 @@ func run(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 func (b *Bridge) serve(parent context.Context, c net.Conn, r io.Reader, selfTest bool) error {
+	downGain, upGain := b.streamGains()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if err := CheckTools(); err != nil {
@@ -158,6 +165,7 @@ func (b *Bridge) serve(parent context.Context, c net.Conn, r io.Reader, selfTest
 				return
 			}
 			frame := d.Convert(raw)
+			b.DownlinkLimited.Add(downGain.apply(frame))
 			c.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			if e := writeFull(c, frame); e != nil {
 				failures <- e
@@ -191,7 +199,9 @@ func (b *Bridge) serve(parent context.Context, c net.Conn, r io.Reader, selfTest
 					failures <- errors.New("PCM uplink stalled")
 					return
 				}
-				if e := writeFull(played, u.Convert(frame)); e != nil {
+				playback := u.Convert(frame)
+				b.UplinkLimited.Add(upGain.apply(playback))
+				if e := writeFull(played, playback); e != nil {
 					failures <- e
 					return
 				}

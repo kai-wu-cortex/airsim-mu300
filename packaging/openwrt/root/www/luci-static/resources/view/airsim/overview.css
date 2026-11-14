@@ -25,3 +25,59 @@
 .as-root .as-management-layout hr { margin:24px 0; border:0; border-top:1px solid #e5e5ea; }
 @media (max-width:850px) { .as-management-layout { grid-template-columns:1fr; } }
 @media (max-width:480px) { .as-root .as-port-fields { grid-template-columns:1fr; } }
+
+/* Kernel inventory shares the existing LuCI card and field styles. */
+.as-root.as-kernel>.as-card{display:grid;gap:16px;margin-top:22px}
+.as-root.as-kernel .as-row{flex-wrap:wrap}
+.as-root.as-kernel .as-row dd{overflow-wrap:anywhere}
+.as-root.as-kernel pre{max-width:100%;padding:14px;border-radius:10px;background:#f5f5f7;font-size:12px;line-height:1.7}
+.as-root.as-kernel ul{padding-left:20px;overflow-wrap:anywhere}
+.as-root.as-kernel .as-button{justify-self:start}
+
+/* Shared surfaces and controls, independently implemented for the develop UI.
+ * Visual reference: shangjie1998/airsim-f50-openwrt a9c5c66 (see docs/UI_ADAPTATION.md).
+ * All tokens and selectors stay inside AirSIM; existing browser preferences win. */
+.as-root{--as-card-bg:#fff;--as-control-bg:#f5f5f7;--as-glass-bg:rgba(255,255,255,.85);--as-edge-top:rgba(255,255,255,.9);--as-shadow:0 10px 28px -16px #14243b30;--as-track:#777b85;--as-good:#216b39;--as-good-bg:#edf7ef;--as-bad:#a52a28;--as-bad-bg:#fff3f2;color-scheme:light}
+.as-root>.as-card{margin-top:22px}
+.as-root .as-card{border-radius:26px;background:var(--as-card-bg);box-shadow:inset 0 1px var(--as-edge-top),var(--as-shadow)}
+.as-root .as-field{display:grid;gap:8px;max-width:640px;font-size:14px}
+.as-root .as-field :is(input:not([type=checkbox]),select){width:100%}
+.as-root :is(input:not([type=checkbox]):not([type=radio]),select,textarea){min-width:0;max-width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--as-line);border-radius:12px;background:var(--as-card-bg);color:var(--as-ink);font:inherit;box-shadow:none}
+.as-root .as-management-stack>.as-button{justify-self:start}
+.as-root .as-button{min-height:44px;border-radius:12px}
+.as-root .as-secondary{background:var(--as-control-bg);border-color:var(--as-line);color:var(--as-ink)}
+.as-root .as-secondary:hover:not(:disabled){background:var(--as-card-bg);border-color:var(--as-blue)}
+.as-root .as-primary{background:#0071e3;color:#fff}
+.as-root .as-danger{background:var(--as-bad-bg);color:var(--as-bad);border-color:var(--as-line)}
+.as-root :is(input,select,textarea,button,summary):focus-visible{outline:3px solid var(--as-blue);outline-offset:3px}
+.as-root :is(.as-version,.as-sms-full,.as-code-area,.as-technical,pre){background:var(--as-control-bg);color:var(--as-ink);border-color:var(--as-line)}
+.as-root .as-row{border-color:var(--as-line)}
+.as-root .as-pill-green{background:var(--as-good-bg);color:var(--as-good)}
+.as-root .as-pill-neutral{background:var(--as-control-bg);color:var(--as-muted)}
+.as-root .as-management-stack>.as-pill{justify-self:start}
+.as-root .as-feedback{background:var(--as-control-bg);color:var(--as-ink);border-radius:12px;overflow-wrap:anywhere}
+.as-root .as-feedback:empty{display:none}
+.as-root .as-feedback-success{background:var(--as-good-bg);color:var(--as-good);border-color:var(--as-good)}
+.as-root .as-feedback-error{background:var(--as-bad-bg);color:var(--as-bad);border-color:var(--as-bad)}
+.as-root .as-management-feedback{color:var(--as-good)}
+.as-root .as-management-feedback.is-error{color:var(--as-bad)}
+/* Native input owns checked/disabled state; the visible track is decorative.
+ * Entire labelled row is a touch target, including at least 44px height. */
+.as-root .as-switch-field{display:flex;align-items:center;gap:12px;position:relative;min-height:44px;width:fit-content;max-width:100%;cursor:pointer;font-size:14px;margin:8px 0}
+.as-root .as-switch-field>input{position:absolute;left:0;top:50%;width:54px;height:32px;margin:0;opacity:0;transform:translateY(-50%);cursor:inherit}
+.as-root .as-switch-track{display:block;position:relative;flex:0 0 54px;width:54px;height:32px;background:var(--as-track);border:1px solid var(--as-line);border-radius:18px;pointer-events:none;transition:background-color .18s}
+.as-root .as-switch-knob{display:block;position:absolute;left:3px;top:3px;width:24px;height:24px;background:#fff;border-radius:50%;box-shadow:0 1px 4px #0004;transition:transform .18s}
+.as-root .as-switch-field>input:checked+.as-switch-track{background:#0071e3;border-color:#0071e3}
+.as-root .as-switch-field>input:checked+.as-switch-track>.as-switch-knob{transform:translateX(22px)}
+.as-root .as-switch-field>input:focus-visible+.as-switch-track{outline:3px solid var(--as-blue);outline-offset:3px}
+.as-root .as-switch-field>input:disabled~span{opacity:.5;cursor:default}
+html[data-airsim-density=compact] .as-root{padding:18px}
+html[data-airsim-density=compact] .as-root .as-card{padding:18px}
+html[data-airsim-density=compact] .as-root .as-management-stack{gap:12px}
+html[data-airsim-theme=dark] .as-root{--as-ink:#f4f4f6;--as-muted:#b2b4bf;--as-line:#454650;--as-blue:#63aafa;--as-card-bg:#252630;--as-control-bg:#30323e;--as-glass-bg:rgba(37,38,48,.88);--as-edge-top:#ffffff1a;--as-shadow:0 12px 32px -16px #000b;--as-track:#717582;--as-good:#a3e4b2;--as-good-bg:#183f2b;--as-bad:#ffc4bd;--as-bad-bg:#512422;background:#171820;color-scheme:dark}
+@media(prefers-color-scheme:dark){html[data-airsim-theme=system] .as-root{--as-ink:#f4f4f6;--as-muted:#b2b4bf;--as-line:#454650;--as-blue:#63aafa;--as-card-bg:#252630;--as-control-bg:#30323e;--as-glass-bg:rgba(37,38,48,.88);--as-edge-top:#ffffff1a;--as-shadow:0 12px 32px -16px #000b;--as-track:#717582;--as-good:#a3e4b2;--as-good-bg:#183f2b;--as-bad:#ffc4bd;--as-bad-bg:#512422;background:#171820;color-scheme:dark}}
+/* Solid by default, including old browsers; transparency is opt-in. */
+@supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){html[data-airsim-transparency=true] .as-root .as-card{background:var(--as-glass-bg);-webkit-backdrop-filter:blur(18px) saturate(140%);backdrop-filter:blur(18px) saturate(140%)}}
+@media(prefers-reduced-transparency:reduce){html[data-airsim-transparency=true] .as-root .as-card{background:var(--as-card-bg);-webkit-backdrop-filter:none;backdrop-filter:none}}
+@media(prefers-reduced-motion:reduce){.as-root *,.as-root *::before,.as-root *::after{transition:none!important;animation:none!important}}
+@media(max-width:420px){.as-root .as-card{border-radius:20px}.as-root .as-switch-field{width:100%}}

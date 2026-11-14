@@ -1,5 +1,7 @@
 'use strict';
-'require view';
+'require baseclass';
+'require view.airsim.ui as ui';
+'require view.airsim.appearance as appearance';
 'require rpc';
 'require poll';
 
@@ -43,9 +45,9 @@ function relayDescription(s) {
  return r.configured ? 'Relay 已配置 · 尚未确认实时命令通道连接' : '尚未配置云端配对资料';
 }
 
-return view.extend({
+return baseclass.extend({
  load: function(){ return Promise.all([getSettings(),getStatus().catch(function(){return {};}),updateStatus().catch(function(){return {};})]); },
- render: function(data) {
+ render: function(data,section) {
   var config = data[0], state = data[1] || {}, pending = false, fields = {}, buttons = {};
   if (!config || !config.ok || !config.settings) return E('p', {'role':'alert'}, config && config.error || '无法读取管理设置，请检查插件安装；不会用默认值覆盖已有设置。');
   var settings = config.settings;
@@ -70,7 +72,7 @@ return view.extend({
    buttons.updates.disabled = pending;
    buttons.install.disabled = pending || !updateKnown || !!updateInfo.busy || !editable() || !latest;
    buttons.confirm.disabled = buttons.install.disabled || confirmedTag !== latest;
-   automatic.disabled = previews.disabled = pending || !!updateInfo.busy;
+   automatic.disabled = previews.disabled = pending || !!updateInfo.busy || !updateKnown;
    // Never replace editable fields during polling: an unfinished draft is local.
   }
   function input(key, label, type, help) {
@@ -132,6 +134,7 @@ return view.extend({
   function showUpdateStatus(info) {
    updateKnown = !!info.ok; updateInfo = info;
    if (!updateKnown) { latest = ''; jobResult.textContent = '更新状态暂不可用，等待重新连接；不会自动重试安装。'; return; }
+   if(info.policy){automatic.checked=!!info.policy.automatic;previews.checked=!!info.policy.previews;}
    var cache = info.cache || {};
    if (cache.previews === !!previews.checked && cache.result) showRelease(cache.result);
    else { latest = ''; updateResult.textContent = cache.error || '尚无当前频道的检查结果，可点击检查更新。'; }
@@ -146,7 +149,10 @@ return view.extend({
     var info = await updatePolicy(JSON.stringify({automatic:!!automatic.checked,previews:!!previews.checked}));
     if (!info.ok || info.error) throw Error(info.error || '保存更新偏好失败');
     showUpdateStatus(info);
-   } catch(e) { updateKnown = false; jobResult.textContent = e.message || '保存失败'; }
+   } catch(e) {
+    if(updateInfo.policy){automatic.checked=!!updateInfo.policy.automatic;previews.checked=!!updateInfo.policy.previews;}
+    updateKnown = false; jobResult.textContent = (e.message || '保存失败')+'；当前结果未知，等待状态刷新，不会自动重试。';
+   }
    finally { pending = false; refresh(state); }
   }
   automatic.addEventListener('change', savePolicy);
@@ -194,7 +200,7 @@ return view.extend({
     E('div',{'class':'as-management-stack'},[
      E('section',{'class':'as-card'},[E('h3',{},'Relay 与运行状态'),relay,runtime,E('p',{'class':'as-caption'},'“已配置”不等于公网可达；命令通道连接也不代表双向语音已验收。')]),
      E('section',{'class':'as-card'},[E('h3',{},'维护工具'),E('p',{'class':'as-copy'},'导出可分享的状态报告。'),E('p',{'class':'as-caption'},'不读取短信正文，不导出号码、IP、Relay 地址、标识、配对码、密钥、原始日志或音频；不会自动上传。'),buttons.diagnostics,
-      E('hr',{}),E('h3',{},'插件更新'),E('label',{'class':'as-check-label','for':'as-auto-update'},[automatic,' 自动检查更新（每 6 小时）']),E('label',{'class':'as-check-label','for':'as-previews'},[previews,' 包含开发预览版']),E('p',{'class':'as-caption'},'自动检查只获取公开版本信息，不自动安装。先在概览关闭电话服务，再更新；安装前验证签名、设备与通话/短信空闲状态。'),buttons.updates,updateResult,buttons.install,confirmation,jobResult,updateLink]),
+      E('hr',{}),E('h3',{},'插件更新'),appearance.switchField('自动检查更新（每 6 小时）',automatic),appearance.switchField('包含开发预览版',previews),E('p',{'class':'as-caption'},'自动检查只获取公开版本信息，不自动安装。先在概览关闭电话服务，再更新；安装前验证签名、设备与通话/短信空闲状态。'),buttons.updates,updateResult,buttons.install,confirmation,jobResult,updateLink]),
      E('section',{'class':'as-card'},[E('h3',{},'版本说明'),E('p',{'class':'as-copy'},'当前安装：'+config.version),E('ul',{'class':'as-instructions'},[
       E('li',{},'r17：插件与匹配音频组件一体安装，缺失固件自动校验下载，必要时重启后继续准备。'),E('li',{},'r16：修复麦克风突发帧丢弃与上行卡顿。'),E('li',{},'r15 已撤回；保留插件兼容性、依赖和签名校验改进。'),E('li',{},'r14：自动检查更新、签名校验升级、任务进度与失败提示。'),E('li',{},'保留 r13 的连接模式、Relay、端口、脱敏诊断和版本说明。'),E('li',{},'包含 MU300 振铃 mode 3 解析修复；已有通话和短信功能保留。'),E('li',{},'U30 Air 短时局域网双向声音已人工确认；长通话、多路及其他硬件尚未验收。')])])
     ])
@@ -202,6 +208,17 @@ return view.extend({
   ]);
   showUpdateStatus(updateInfo); refresh(state);
   poll.add(function(){ if (pending) return Promise.resolve(); return Promise.all([getStatus().catch(function(){return {};}),updateStatus().catch(function(){return {};})]).then(function(r){showUpdateStatus(r[1]);refresh(r[0]);}); },5);
+  if(section==='connect')return ui.page('connect','连接方式，自己定。','只管理 U30 这一侧，客户端连接设置保持独立。',[
+   ui.card('连接模式',[E('label',{'class':'as-field'},['连接方式',fields.mode]),E('p',{'class':'as-caption'},'仅局域网会禁用 Relay；云端模式保留局域网通路。')]),
+   ui.card('Relay 地址',[E('label',{'class':'as-field'},['Relay HTTPS 地址',fields.relay_url]),E('p',{'class':'as-caption'},'留空跟随配对地址。变更后需在客户端设置相同地址并重新配对。')]),
+   ui.card('端口与接口',[E('label',{'class':'as-field'},['可信 LAN 接口',fields.interface]),E('label',{'class':'as-field'},['Tailscale 接口（可选）',fields.tunnel_interface]),E('label',{'class':'as-field'},['配对端口',fields.pair_port]),E('label',{'class':'as-field'},['控制端口',fields.control_port]),E('label',{'class':'as-field'},['PCM 端口',fields.pcm_port])]),
+   ui.card('运行状态',[relay,runtime]),ui.card('保存',[E('p',{'class':'as-caption'},'先在概览关闭服务，保存后再手动启动。'),buttons.save,feedback])
+  ],E('span',{'class':'as-version'},'v'+config.version));
+  if(section==='maintenance')return {
+   update:ui.card('插件更新',[appearance.switchField('自动检查更新（每 6 小时）',automatic),appearance.switchField('包含开发预览版',previews),E('p',{'class':'as-caption'},'只检查，不自动安装。升级须先关闭服务并确认。'),buttons.updates,updateResult,buttons.install,confirmation,jobResult,updateLink]),
+   diagnostics:ui.card('诊断导出',[E('p',{'class':'as-caption'},'仅导出脱敏状态，不含号码、短信、密钥或音频。'),buttons.diagnostics,feedback]),
+   version:ui.card('版本说明',[E('p',{},'当前安装：'+config.version),E('p',{'class':'as-caption'},'R25 开发预览。新增音量、设备管理与内核选择；新硬件和内核支持以实际验收记录为准。')])
+  };
   return root;
  },
  handleSaveApply:null,handleSave:null,handleReset:null

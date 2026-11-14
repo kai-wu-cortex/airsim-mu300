@@ -76,6 +76,7 @@ func (g *Gateway) watchAuth(r *http.Request, body []byte) ([]byte, string) {
 		clear(parent)
 		if hmac.Equal([]byte(Sign(key, canonical(r.Method, r.URL.RequestURI(), body, ts, nonce))), []byte(sig)) {
 			g.seen[nonce] = time.Now().Unix() + 61
+			g.touchClientLocked(owner, time.Now().Unix())
 			return key, owner
 		}
 		clear(key)
@@ -232,6 +233,10 @@ func (g *Gateway) issueWatch(owner string, id WatchIdentity, instance string) (s
 func (g *Gateway) Remove(encoded string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.removeLocked(encoded)
+}
+
+func (g *Gateway) removeLocked(encoded string) error {
 	parent, e := decode(encoded)
 	if e != nil {
 		return e
@@ -248,6 +253,12 @@ func (g *Gateway) Remove(encoded string) error {
 		return err
 	}
 	g.keys = keys
+	delete(g.lastUsed, owner)
+	for k, lease := range g.earlyLeases {
+		if lease.owner == "wlan:"+owner {
+			delete(g.earlyLeases, k)
+		}
+	}
 	for k, l := range g.watchLeases {
 		if l.grant.Owner == owner {
 			delete(g.watchLeases, k)

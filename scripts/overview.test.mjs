@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {webcrypto} from 'node:crypto';
-const source=readFileSync(new URL('../packaging/openwrt/root/www/luci-static/resources/view/airsim/overview.js',import.meta.url),'utf8');
+const source=readFileSync(new URL('../packaging/openwrt/root/www/luci-static/resources/view/airsim/overview_panel.js',import.meta.url),'utf8');
 const idle=()=>({running:true,service_alive:true,agent:{reachable:true},calls:{available:true,calls:[]}});
 function setup(initial=idle()) {
  const elements=[],requests=[];let state=initial,poll,answer=async()=>({ok:true,call_id:'mu300-fixture'});
@@ -13,9 +13,9 @@ function setup(initial=idle()) {
   if(Array.isArray(children))node.children=children;else node.textContent=children;
   elements.push(node);return node;
  }
- const view=new Function('view','rpc','poll','E','L','crypto','sms',source)(
+ const view=new Function('baseclass','rpc','poll','E','L','crypto','sms','ui',source)(
   {extend:x=>x},{declare:o=>(...args)=>o.method==='status'?Promise.resolve(state):(requests.push({method:o.method,args}),answer(...args))},
-  {add:fn=>{poll=fn}},E,{resource:x=>x},webcrypto,{render:()=>E('section',{'class':'as-card as-sms'})});
+  {add:fn=>{poll=fn}},E,{resource:x=>x,url:x=>x},webcrypto,{render:()=>E('section',{'class':'as-card as-sms'})},{decorate:x=>x});
  const root=view.render(initial);
  const button=label=>elements.find(x=>x.tag==='button'&&x.textContent===label);
  const input=elements.find(x=>x.attrs.id==='as-dial-number'),select=elements.find(x=>x.attrs.id==='as-call-select');
@@ -67,4 +67,29 @@ test('incomplete audio installation is visible and cannot start calls or pairing
   assert.match(t.root.textContent,audio_setup==='reboot_required'?/重启进入 OpenWrt/:/准备/);
   assert.equal(t.requests.length,0);
  }
+});
+
+test('operator and signal source are visible and failed readings clear old values',async()=>{
+ const t=setup({...idle(),sim:{operator:'中国联通',signal_dbm:-96,signal_source:'vendor_rsrp'}});
+ assert.match(t.root.textContent,/中国联通/);assert.match(t.root.textContent,/-96 dBm · RSRP/);
+ t.setState({...idle(),sim:{signal_dbm:null}});await t.poll();
+ assert.doesNotMatch(t.root.textContent,/中国联通|-96 dBm/);assert.match(t.root.textContent,/基带暂未提供/);
+});
+
+test('pairing code uses device remaining lifetime despite browser clock skew',async()=>{
+ for(const skew of [-7200000,7200000]){
+  const t=setup({...idle(),pairing:{code:'012345',expires_at:Date.now()+skew,remaining_ms:90000}});
+  assert.ok(t.elements.some(n=>n.className==='as-code is-active'&&n.textContent==='012345'));
+  assert.match(t.root.textContent,/90 秒后失效/);
+  t.setState({...idle(),pairing:null});await t.poll();
+  assert.ok(t.elements.some(n=>n.className==='as-code'&&n.textContent==='— — — — — —'));
+ }
+});
+test('invalid or expired relative TTL cannot revive a code; old server remains compatible',()=>{
+ for(const remaining_ms of [0,-1,'120000',null,NaN]){
+  const t=setup({...idle(),pairing:{code:'012345',expires_at:Date.now()+120000,remaining_ms}});
+  assert.ok(t.elements.some(n=>n.className==='as-code'&&n.textContent==='— — — — — —'));
+ }
+ const t=setup({...idle(),pairing:{code:'012345',expires_at:Date.now()+90000}});
+ assert.ok(t.elements.some(n=>n.className==='as-code is-active'&&n.textContent==='012345'));
 });

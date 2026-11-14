@@ -7,12 +7,13 @@ const stopped=()=>({running:false,service_alive:false});
 function setup(initial=stopped()){
  const nodes=[],requests=[];let state=initial,poll,response={ok:true,message:'saved'},download,info={ok:true,policy:{automatic:true,previews:true},cache:{},job:{phase:'idle'},busy:false};
  function E(tag,attrs={},children=[]){
-  const n={tag,attrs,children:Array.isArray(children)?children:[children],value:attrs.value??'',disabled:false,checked:!!attrs.checked,href:attrs.href,click(){download=this},remove(){},appendChild(x){this.children.push(x)},addEventListener(event,fn){this.attrs[event]=fn}};
+  const n={tag,attrs,children:Array.isArray(children)?children:[children],value:attrs.value??'',disabled:false,checked:!!attrs.checked,href:attrs.href,click(){download=this},remove(){},appendChild(x){this.children.push(x)},addEventListener(event,fn){this.attrs[event]=fn},setAttribute(k,v){this.attrs[k]=v}};
   let content;Object.defineProperty(n,'textContent',{get(){return content??this.children.map(c=>typeof c==='object'?c.textContent:c).join('')},set(v){content=String(v)}});nodes.push(n);return n;
  }
- const view=new Function('view','rpc','poll','E','L','URL','Blob','document','setTimeout',source)(
+ const appearance=new Function('baseclass','localStorage','document','E',readFileSync(new URL('../packaging/openwrt/root/www/luci-static/resources/view/airsim/appearance.js',import.meta.url),'utf8'))({extend:x=>x},{getItem:()=>null},{},E);
+ const view=new Function('baseclass','rpc','poll','E','L','URL','Blob','document','setTimeout','appearance',source)(
   {extend:x=>x},{declare:spec=>(...args)=>{if(spec.method==='status')return Promise.resolve(state);if(spec.method==='updates_status')return Promise.resolve(info);requests.push({method:spec.method,args});return Promise.resolve(response)}},
-  {add:fn=>poll=fn},E,{url:x=>'/'+x,resource:x=>x},Object.assign(class extends URL {},{createObjectURL:()=> 'blob:test',revokeObjectURL:()=>{}}),Blob,{body:{appendChild(){}}},fn=>fn());
+  {add:fn=>poll=fn},E,{url:x=>'/'+x,resource:x=>x},Object.assign(class extends URL {},{createObjectURL:()=> 'blob:test',revokeObjectURL:()=>{}}),Blob,{body:{appendChild(){}}},fn=>fn(),appearance);
  const root=view.render([{ok:true,settings:settings(),version:'0.1.0-r14'},initial,info]);
  const button=name=>nodes.find(n=>n.tag==='button'&&n.textContent===name);
  return {root,nodes,requests,button,field:key=>nodes.find(n=>n.attrs.id==='as-setting-'+key),reply:v=>response=v,updates:v=>info=v,state:v=>state=v,poll:()=>poll(),download:()=>download};
@@ -82,4 +83,13 @@ test('optional Tailscale interface is empty for old settings and validated befor
  t.field('tunnel_interface').value='tailscale0;reboot';await t.button('保存设置').attrs.click();assert.equal(t.requests.length,0);
  t.field('tunnel_interface').value='tailscale0';await t.button('保存设置').attrs.click();assert.equal(t.requests.length,1);
  assert.equal(JSON.parse(t.requests[0].args[0]).tunnel_interface,'tailscale0');
+});
+
+test('failed switch save restores last confirmed policy and waits for a fresh status',async()=>{
+ const t=setup(),automatic=t.nodes.find(n=>n.attrs.id==='as-auto-update');
+ automatic.checked=false;t.reply({ok:false,error:'offline'});await automatic.attrs.change();
+ assert.equal(automatic.checked,true);assert.equal(automatic.disabled,true);assert.equal(t.requests.length,1);
+ assert.match(t.root.textContent,/当前结果未知/);
+ t.updates({ok:true,policy:{automatic:false,previews:true},cache:{},busy:false});await t.poll();
+ assert.equal(automatic.checked,false);assert.equal(automatic.disabled,false);assert.equal(t.requests.length,1);
 });

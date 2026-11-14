@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python3 "$HERE/scripts/check-develop-consistency.py"
 AGENT_TREE=$(sh "$HERE/scripts/prepare-agent.sh")
 AGENT_SOURCE=$AGENT_TREE/module/module-agent
 VERSION=$(cat "$HERE/VERSION")
@@ -27,4 +28,5 @@ for component in plugin agent; do
  done
 done
 cp "$(go env GOROOT)/LICENSE" "$HERE/out/dependency-licenses/Go-LICENSE"
+python3 "$HERE/scripts/check-develop-consistency.py" --binaries "$HERE/out/linux-arm64"
 printf 'Built %s\n' "$HERE/out/linux-arm64"

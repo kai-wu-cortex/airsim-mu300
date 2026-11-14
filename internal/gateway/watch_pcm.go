@@ -71,11 +71,10 @@ func (g *Gateway) serveWatchPCM(parent context.Context, c net.Conn, reader *bufi
 		return
 	}
 	g.mu.Lock()
-	if g.pcm || g.closing {
+	if !g.reserveClientPCMLocked(grant.Owner) {
 		g.mu.Unlock()
 		return
 	}
-	g.pcm = true
 	g.mu.Unlock()
 	defer func() { g.mu.Lock(); g.pcm = false; g.mu.Unlock() }()
 	ctx, cancel := context.WithCancel(parent)

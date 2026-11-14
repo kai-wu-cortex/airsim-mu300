@@ -20,10 +20,41 @@ service_status() {
 }
 case "$1" in
 list)
-	printf '%s\n' '{"status":{},"settings_get":{},"settings_save":{"config":""},"diagnostics":{},"updates":{"previews":true},"updates_status":{},"updates_policy":{"config":""},"update_install":{"tag":""},"pair_start":{},"pair_cancel":{},"number_refresh":{},"start":{},"stop":{},"call_action":{"action":"","number":"","call_id":"","operation_id":""}}'
+	printf '%s\n' '{"sms_send":{"num":"","text":""},"device_read":{"config":""},"device_write":{"config":""},"sms_list":{"page":""},"pair_clients":{},"pair_remove":{"id":""},"kernel_status":{},"status":{},"settings_get":{},"settings_save":{"config":""},"diagnostics":{},"updates":{"previews":true},"updates_status":{},"updates_policy":{"config":""},"update_install":{"tag":""},"pair_start":{},"pair_cancel":{},"number_refresh":{},"start":{},"stop":{},"call_action":{"action":"","number":"","call_id":"","operation_id":""}}'
 	;;
 call)
 	case "$2" in
+	device_read|device_write)
+		IFS= read -r request
+		if ! json_load "$request"; then printf '%s\n' '{"error":"维护请求无效"}'; exit 0; fi
+		json_get_var config config
+		case "$2" in device_read) operation=device-read ;; *) operation=device-write ;; esac
+		printf '%s' "$config" | /usr/lib/airsim/airsim-mu300d --manage "$operation"
+		;;
+	sms_send)
+		/usr/lib/airsim/airsim-mu300d --manage sms-send
+		;;
+	sms_list)
+		IFS= read -r request
+		if ! json_load "$request"; then printf '%s\n' '{"error":"页码无效"}'; exit 0; fi
+		json_get_var page page
+		json_init; json_add_string action sms_list; json_add_string page "$page"
+		json_dump | /usr/lib/airsim/airsim-mu300d --manage device-read
+		;;
+	pair_clients)
+		wget -q -T 5 -O - http://127.0.0.1:7581/pair/clients || printf '%s\n' '{"error":"无法读取配对列表，请确认服务已启动"}'
+		;;
+	pair_remove)
+		IFS= read -r request
+		if ! json_load "$request"; then printf '%s\n' '{"error":"无效配对请求"}'; exit 0; fi
+		json_get_var id id
+		json_init; json_add_string id "$id"
+		payload=$(json_dump)
+		wget -q -T 5 --post-data="$payload" -O - http://127.0.0.1:7581/pair/remove || printf '%s\n' '{"error":"未确认移除结果，请刷新列表；不会自动重试"}'
+		;;
+	kernel_status)
+		/usr/lib/airsim/airsim-mu300d --manage kernel-status
+		;;
 	updates_status)
 		/usr/lib/airsim/airsim-mu300d --manage updates-status
 		;;

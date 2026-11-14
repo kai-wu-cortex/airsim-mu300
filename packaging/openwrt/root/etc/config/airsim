@@ -1,3 +1,5 @@
 config service 'main'
 	option enabled '0'
 	option interface 'br-lan'
+	option pcm_downlink_gain_db '0'
+	option pcm_uplink_gain_db '0'

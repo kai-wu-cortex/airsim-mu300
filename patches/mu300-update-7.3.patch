@@ -1,0 +1,20 @@
+--- a/mu300-update
++++ b/mu300-update
+@@ -2817,7 +2817,7 @@
+ # Kept on the Linux partition, so both systems and every update follow it - without it an update of a device on
+ # 6.18 installed the release's 5.4 kernel. "mu300-update kernel 6.18" changes it.
+ KERNEL_CHOICE=$BOOTDIR/kernel
+-KERNELS="5.4 6.18 7.2"
++KERNELS="5.4 6.18 7.2 7.3"
+ kernel_choice() { c=$(cat "$KERNEL_CHOICE" 2>/dev/null); case " $KERNELS " in *" $c "*) echo "$c" ;; *) echo 5.4 ;; esac; }
+ kernel_asset() { case $(kernel_choice) in 5.4) echo mu300-kernel.tar.gz ;; *) echo "mu300-kernel-$(kernel_choice).tar.gz" ;; esac; }
+ 
+@@ -3342,7 +3342,7 @@
+     mounted_disk
+     case ${1:-} in
+         '') printf 'kernel: %s (running %s)\n' "$(kernel_choice)" "$(uname -r)"; return 0 ;;
+-        5.4|6.18|7.2) ;;
++        5.4|6.18|7.2|7.3) ;;
+         *) die "usage: mu300-update kernel [5.4|6.18|7.2]" ;;
+     esac
+     [ "$1" = 5.4 ] && [ "$(ubuntu_release)" = 26.04 ] &&

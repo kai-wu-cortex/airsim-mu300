@@ -18,7 +18,7 @@ AirSIM 客户端协议源为 PR36 集成分支的 `docs/protocols/watch-direct-v
 - Agent 首次验证精确推送 tuple 后绑定不可复用的 MU300 原生 UUID；原生槽号和号码不作身份。
   初次 ringing answer 在与原有控制共用的锁内认领父配对 owner，之后即使命令结果未知也不重发。
   已被其他设备接通的电话不能通过新 claim 接管；只有本 owner 能结束已认领目标。
-  最多保存 64 个绑定，保留四小时；有明确原生终态记录才返回 ended。
+  最多保存 64 个绑定，保留四小时；有明确原生终态记录才返回 ended；已确认终态在该绑定剩余寿命内保留，后续采样失败不抹掉它。
 
 ### U30 的初始身份限制
 
@@ -80,3 +80,16 @@ Watch 认领通话确认 active/ended 后发布绑定 tuple 的所有权事件�
 双向音质、挂断/配对撤销时延、网络切换、长通话、真实短信回复；后台通知端到端也待验证。
 源码测试不构成 R23 已发布包新增这些能力，不构成 F50/其他设备适配。没有 USB 操作、
 安装、发布、真实电话、短信或录音。
+
+
+## 2026-11-13：PR36 Build 220／142 增量对齐
+
+对齐 AirSIM 选择性整合提交 `5904e0e`（源 PR head `4a772b3951b88d6d011fce4e95c674d331dc0f85`），保留本仓库 `c7bdc00` Watch v2 与 `9f5c5ee` 短信生产者身份修复。没有合入原 PR 的客户端、Android 或 Relay 源码，没有增加线协议路径或字段。
+
+- **同一来电身份**：仅 `mu300-openwrt` profile，对有效原生 UUID 使用小写规范形式作为推送 `call_uuid`。LAN `call_id`、iPhone／Watch 共用的 Relay 来电事件和云端 descriptor 因而对应同一 UUID。旧的非 UUID `call_id` 保持原值，并继续使用独立推送 UUID；其他 profile 保持原行为。已经生成的旧推送 tuple 在重试期间不改 UUID、secret 或 generation。
+- **挂断确认**：Watch v2 已绑定完整 tuple 的通话，一旦原生历史确认该不可复用 instance 的 `EndedAt`，就保留 terminal 标记至原四小时绑定期限。后续 status/hangup/answer/check 返回同一终态，不因基带查询失败、历史轮换或新电话到来而变回 unknown，也不再发送 AT 控制命令。仅凭查不到电话、陈旧快照、另一通电话的终态仍不能返回 ended。
+- **签名与授权**：网关仍签名绑定请求 nonce、HTTP 状态及包含完整 agent/call/UUID/generation 的 payload；ended 不签发媒体 grant。错误 tuple、其他已认领 owner、过期绑定和配对撤销保护保留。客户端最多三轮挂断确认不改变设备端的重复控制抑制，不跨通道或跨通话重发。
+
+新增回归覆盖 UUID／旧 ID／旧 tuple 重试、云端 descriptor 与推送一致、已结束后基带失联及下一通到来、错误 tuple 和 owner、过期、未知状态不冒充结束，以及网关签名终态不附带媒体授权。所有通话和 Relay 均使用本机测试桩；没有真实电话、短信或设备操作。
+
+本轮源码验证记录见 [PR36 评估补充](reviews/PR36_WATCH_V2_ASSESSMENT.md)。真实运营商终态采样时延、iPhone 锁屏下 Watch 接听与挂断仍待实机验收。

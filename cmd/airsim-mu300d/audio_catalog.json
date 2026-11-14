@@ -1,0 +1,8 @@
+{
+ "version":1,
+ "profiles":[
+  {"id":"u30-5.4","kernel":"5.4.254-gb50db5b6224c","config_sha256":"1057cb97e0d2d7f26816e8bf7841faac1153833a01d4893cdc196b75ae6356b3","available":true,"bundle":"airsim-audio-0.1.0-r16.tar.gz","sha256":"5af9b2dd888905b453b61273668736c24e1dd67b821d5fdb5a59c807a0134af3","evidence":"U30 Air 既有双向通话验收；固定构建 ABI 审核。此次新增维护界面尚未实机验收。"},
+  {"id":"reference-6.18","kernel":"6.18.60","available":false,"evidence":"参考仓库有模块，但缺少本项目可复现的配置和完整符号 ABI 验证，未做实机验收；禁止安装。"},
+  {"id":"reference-7.3","kernel":"7.3.1","available":false,"evidence":"参考仓库有模块，但缺少本项目可复现的配置和完整符号 ABI 验证，未做实机验收；禁止安装。"}
+ ]
+}

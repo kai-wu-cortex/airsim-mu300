@@ -1,5 +1,8 @@
 #!/bin/sh
 # rpcd must rescan the new executable and ACL before LuCI can call it.
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
+/usr/lib/airsim/dashboard-setup --install
+/etc/init.d/airsim-device-settings enable
 /etc/init.d/airsim-update enable >/dev/null 2>&1
 (/etc/init.d/airsim-update restart >/dev/null 2>&1) &
 (/etc/init.d/rpcd restart >/dev/null 2>&1) &

@@ -35,6 +35,7 @@ func (b *Bridge) openEarlyMedia(parent context.Context, start earlyCaptureStart)
 	if !b.busy.CompareAndSwap(false, true) {
 		return nil, errors.New("audio already owned")
 	}
+	downGain, _ := b.streamGains()
 	ctx, cancel := context.WithCancel(parent)
 	r, w := io.Pipe()
 	stream := &earlyCaptureStream{reader: r, cancel: cancel, done: make(chan struct{})}
@@ -72,6 +73,7 @@ func (b *Bridge) openEarlyMedia(parent context.Context, start earlyCaptureStart)
 				return
 			}
 			frame := down.Convert(raw)
+			b.DownlinkLimited.Add(downGain.apply(frame))
 			if err = writeFull(w, frame); err != nil {
 				return
 			}

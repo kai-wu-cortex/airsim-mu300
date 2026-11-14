@@ -1,13 +1,19 @@
 # Release sources and reproducibility
 
-Applies to the `v0.1.0-r23` development preview. It adds optional native Tailscale
-IPv4 manual pairing and per-call cloud receive buffer negotiation. These features
-and the final R23 APK have automated coverage but no independent hardware acceptance.
-Existing cloud early-media v1 and VoWLAN authentication remain in place.
-PR #29 interfaces, SMS, long-call stability and offline firmware recovery retain
-their documented untested boundaries. Audio remains 8 kHz PCM. Release assets:
-<https://github.com/kai-wu-cortex/airsim-mu300/releases/tag/v0.1.0-r23>.
-Download `airsim-mu300-0.1.0-r23-sources.tar.gz` alongside the binary package.
+R25 UI reference:
+`shangjie1998/airsim-f50-openwrt@a9c5c66cd2ce3e386284fc8f394a5845c8547e09`.
+Visual/interaction reference only, independently implemented here; no fork UI
+source or binaries are vendored. See [UI adaptation review](docs/UI_ADAPTATION.md).
+
+Applies to the `v0.1.0-r25` development preview. It adds the reorganized LuCI UI,
+independent PCM gains, clock-skew-tolerant pairing-code display, device management,
+and guarded manual kernel selection. It includes device-side Watch v2 identity and
+terminal confirmation fixes plus SIP caller identity normalization. R23 Tailscale
+and cloud buffer negotiation remain in place. U30 Air candidates passed installation
+and basic checks; new call behavior, gain listening tests, U30L and new kernels are
+not hardware-accepted. Audio remains 8 kHz PCM. Release assets:
+<https://github.com/kai-wu-cortex/airsim-mu300/releases/tag/v0.1.0-r25>.
+Download `airsim-mu300-0.1.0-r25-sources.tar.gz` alongside the binary package.
 It contains plugin sources, the patched Agent and its notices, vendored Go sources,
 audio driver/tool sources, ALSA sources, OpenWrt recipes and MU300 kernel build recipes.
 No private signing keys, device state or user messages/audio are included. The source
@@ -48,7 +54,7 @@ Use the vendored modules to avoid resolving different dependency versions.
 
 ## Rebuilding audio and ALSA dependencies
 
-The R23 APK contains the bridge, Agent, isolated ALSA tools and the hash-pinned
+The R25 APK contains the bridge, Agent, isolated ALSA tools and the hash-pinned
 `airsim-audio-0.1.0-r16.tar.gz` recovery payload: 24 rebuilt modules and static tools.
 The installation workflow selects only its exact kernel/configuration profile,
 backs up replaced files and continues preparation after an arranged boot when
@@ -92,10 +98,51 @@ Run tests, prepare the package, commit reviewed source, then run
 installer and SHA256SUMS. Source archives remain available with the release, not
 merely an offer to provide them later. Preserve every upstream notice and licence.
 Never commit `backups/`, `out/`, an entire workspace, credentials or firmware to
-the source tree. The maintainer requested the fixed DSP backup during R18 development, retained through R23. Its upstream
+the source tree. The maintainer requested the fixed DSP backup during R18 development, retained through R25. Its upstream
 redistribution terms remain undocumented; this release decision is not a grant
 of rights or a declaration that the independent binary is open-source.
 
 The APK builder retains explicit parent directory records (`--compat 3.0.0_pre3`)
 so the v3 package remains compatible with device apk-tools 3.0.5 and the stricter
 archive extraction checks in apk-tools 3.0.8. Signature verification is unchanged.
+
+## Kernel selection workflow reference (develop)
+
+The read-only kernel/audio inventory and manual-command UI were independently
+implemented with reference to shangjie1998/airsim-f50-openwrt commit
+`4df1116997425ae4b91d44cd6121bb25c836162c`:
+<https://github.com/shangjie1998/airsim-f50-openwrt/commit/4df1116997425ae4b91d44cd6121bb25c836162c>.
+Credit to shangjie1998 for the F50 integration workflow. No downstream kernel
+binaries, audio payloads, updater or CONFIG-bypass patch are incorporated.
+See `docs/KERNEL_SELECTION.md` for the distinct support and validation boundaries.
+
+The same pinned F50 integration also informed the develop branch pairing-list,
+SMS command/receipt compatibility and operator/signal fallback workflows. The
+implementation uses this project’s stable key fingerprints, durable revocation,
+no-resend SMS policy and isolated Agent patch. See
+`docs/DEVICE_COMPATIBILITY_DEVELOP.md`; no downstream service-restart deletion
+script or whole Agent tree is incorporated.
+
+### develop 设备维护流程参考
+
+功能参考 [shangjie1998/airsim-f50-openwrt](https://github.com/shangjie1998/airsim-f50-openwrt/tree/4df1116997425ae4b91d44cd6121bb25c836162c)
+的备份、联网、蓝牙、短信、通知、外观、自检及内核目录。感谢 shangjie1998。
+本轮独立实现设备端管理代码，不复制其整棵 Agent、不分发其 6.18/7.3 模块或蓝牙二进制，
+不继承放宽 ABI 检查的做法。源作者的既有版权及 NOTICE 保持不变。
+本项目不是官方 MU300 Linux/Audio 发布，未知硬件没有被标记为已验证。
+
+
+## develop 7.3 updater compatibility patch
+
+`patches/mu300-update-7.3.patch` adapts the two dispatch additions documented by
+shangjie1998/airsim-f50-openwrt at `53f4291117959157c78d48cc28c4f892ac8a85a2`.
+The audited legacy updater is dikeckaan/mu300-linux
+`c760e49e28e872cc0a51a656f36206cecaaf091f`; native 7.3 support is recognized at
+`8aadd074673a23a7e1e37fc07cfd1dd3a7773917`. Full file hashes and behavior are in
+`docs/KERNEL_SELECTION.md`. Only the isolated patch and original integration code
+are shipped; runtime uses the device's byte-pinned updater copy with its existing
+notices. Explicit apply backs up and atomically persists the legacy two-line patch
+so future native updates continue to recognize a selected 7.3 kernel. Public upstream files used by tests are fetched into ignored `out/` by
+`scripts/fetch-kernel-updater-fixtures.py`. No kernel, ramdisk, device firmware or
+additional audio modules are included by this adaptation. This is not an official
+MU300 update release or a verified U30 7.3 audio port.

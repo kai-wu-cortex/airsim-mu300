@@ -1255,10 +1255,10 @@ index 338c9a6..f9e5034 100644
  
  func (a *agent) platform(response http.ResponseWriter, request *http.Request) {
 diff --git a/module/module-agent/modem.go b/module/module-agent/modem.go
-index b2ff8b6..d9b7da6 100644
+index b2ff8b6..414c855 100644
 --- a/module/module-agent/modem.go
 +++ b/module/module-agent/modem.go
-@@ -9,20 +9,23 @@ import (
+@@ -9,20 +9,25 @@ import (
  
  // modemStatus 只暴露 iPad 客户端需要的稳定字段，原始 AT 响应不会写入日志或网络。
  type modemStatus struct {
@@ -1283,6 +1283,8 @@ index b2ff8b6..d9b7da6 100644
 +	Operator             string `json:"operator,omitempty"`
 +	SIMInserted          bool   `json:"sim_inserted"`
 +	SignalDBM            *int   `json:"signal_dbm"`
++	SignalSource         string `json:"signal_source,omitempty"`
++	SignalUpdatedAt      string `json:"signal_updated_at,omitempty"`
 +	NetworkMode          string `json:"network_mode,omitempty"`
 +	RadioBand            string `json:"radio_band,omitempty"`
 +	RegistrationText     string `json:"reg_status_text,omitempty"`
@@ -1298,10 +1300,10 @@ index b2ff8b6..d9b7da6 100644
  var (
 diff --git a/module/module-agent/mu300.go b/module/module-agent/mu300.go
 new file mode 100644
-index 0000000..ad116f3
+index 0000000..45a03e8
 --- /dev/null
 +++ b/module/module-agent/mu300.go
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,354 @@
 +package main
 +
 +import (
@@ -1577,33 +1579,65 @@ index 0000000..ad116f3
 +}
 +
 +func (a *agent) mu300RefreshModem() {
++	a.mu300RefreshModemWithSignal(mu300VendorSignalDBM)
++}
++func (a *agent) mu300RefreshModemWithSignal(vendor func() *int) {
 +	if !a.mu300MetadataIdle() {
 +		return
 +	}
-+	cpin, pinErr := a.at.command("AT+CPIN?", 3*time.Second)
++	cpin, pinErr := a.mu300AT("AT+CPIN?", 3*time.Second)
 +	if !a.mu300MetadataIdle() {
 +		return
 +	}
-+	reg, regErr := a.at.command("AT+CEREG?", 3*time.Second)
++	reg, regErr := a.mu300AT("AT+CEREG?", 3*time.Second)
 +	if !a.mu300MetadataIdle() {
 +		return
 +	}
-+	csq, csqErr := a.at.command("AT+CSQ", 3*time.Second)
++	csq, csqErr := a.mu300AT("AT+CSQ", 3*time.Second)
++	if !a.mu300MetadataIdle() {
++		return
++	}
++	cops, copsErr := a.mu300AT("AT+COPS?", 3*time.Second)
 +	if !a.mu300MetadataIdle() {
 +		return
 +	}
 +	_, _ = a.mu300RefreshNumber()
++	if !a.mu300MetadataIdle() {
++		return
++	}
++	var signal *int
++	source := ""
++	if csqErr == nil {
++		signal = parseSignalDBM(csq)
++	}
++	if signal != nil {
++		source = "csq_rssi"
++	} else {
++		signal = vendor()
++		if signal != nil {
++			source = "vendor_rsrp"
++		}
++	}
 +	a.mu.Lock()
 +	defer a.mu.Unlock()
++	// Do not publish a slow sample after a call has begun.
++	if len(a.mu300Calls) != 0 {
++		return
++	}
 +	if pinErr == nil {
 +		a.modem.SIMInserted = strings.Contains(cpin, "READY")
 +	}
 +	if regErr == nil {
 +		a.modem.RegistrationText = registrationText(parseRegistration(reg))
 +	}
-+	if csqErr == nil {
-+		a.modem.SignalDBM = parseSignalDBM(csq)
++	a.modem.Operator = ""
++	if copsErr == nil {
++		a.modem.Operator = normalizeOperator(parseOperator(cops))
 +	}
++	// Clear stale values when both sources fail. RSSI and RSRP remain identified.
++	a.modem.SignalDBM = signal
++	a.modem.SignalSource = source
++	a.modem.SignalUpdatedAt = time.Now().UTC().Format(time.RFC3339)
 +}
 +
 +func (a *agent) mu300RefreshNumber() (string, error) {
@@ -1611,7 +1645,7 @@ index 0000000..ad116f3
 +	number := ""
 +	status := "unavailable"
 +	if err == nil {
-+		number = parseCNUM(result)
++		number = normalizeMU300SelfNumber(parseCNUM(result))
 +		if number != "" {
 +			status = "available"
 +		} else {
@@ -1982,12 +2016,270 @@ index 0000000..8d5d6b0
 +		t.Fatal("charger overrode known battery state", v)
 +	}
 +}
+diff --git a/module/module-agent/mu300_caller_identity.go b/module/module-agent/mu300_caller_identity.go
+new file mode 100644
+index 0000000..c6f1746
+--- /dev/null
++++ b/module/module-agent/mu300_caller_identity.go
+@@ -0,0 +1,124 @@
++package main
++
++import (
++	"net"
++	"net/url"
++	"strconv"
++	"strings"
++)
++
++// Only a modem-supplied numeric SIP subscriber is a phone-number projection.
++// This is not generic SIP URI equivalence: a SIP username may look numeric.
++// Never use it for dial input, SMS destinations, SIM identity or authentication.
++// Preserve unknown addresses verbatim rather than inventing a telephone number.
++func mu300CallerNumber(raw string) string {
++	raw = strings.TrimSpace(raw)
++	scheme, rest, ok := strings.Cut(raw, ":")
++	if !ok || (!strings.EqualFold(scheme, "sip") && !strings.EqualFold(scheme, "sips")) {
++		return raw
++	}
++	if len(raw) > 512 || strings.ContainsAny(raw, "\r\n\t ") || strings.Count(rest, "@") != 1 {
++		return raw
++	}
++	subscriber, destination, _ := strings.Cut(rest, "@")
++	// A password, phone-context, extension or ISDN subaddress can distinguish
++	// subscribers. Do not discard those components or guess a country prefix.
++	if strings.ContainsAny(subscriber, ":;?") {
++		return raw
++	}
++	subscriber, err := url.PathUnescape(subscriber)
++	if err != nil {
++		return raw
++	}
++	number := mu300NumericCaller(subscriber)
++	if number == "" {
++		return raw
++	}
++	parts := strings.Split(destination, ";")
++	seen := map[string]bool{}
++	for _, part := range parts[1:] {
++		key, value, ok := strings.Cut(strings.ToLower(part), "=")
++		if !ok || seen[key] {
++			return raw
++		}
++		seen[key] = true
++		switch key {
++		case "user":
++			if value != "phone" {
++				return raw
++			}
++		case "transport":
++			if value != "udp" && value != "tcp" && value != "tls" {
++				return raw
++			}
++		default:
++			return raw
++		}
++	}
++	// Parse the authority without ever resolving or connecting to its host.
++	u, err := url.Parse("sip://" + parts[0])
++	if err != nil || u.User != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(parts[0], "%?#/\\") {
++		return raw
++	}
++	host := u.Hostname()
++	if strings.HasPrefix(u.Host, "[") {
++		if net.ParseIP(host) == nil || !strings.Contains(host, ":") {
++			return raw
++		}
++	} else {
++		if len(host) == 0 || len(host) > 253 {
++			return raw
++		}
++		for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
++			if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
++				return raw
++			}
++			for _, c := range label {
++				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
++					return raw
++				}
++			}
++		}
++	}
++	if strings.HasSuffix(u.Host, ":") {
++		return raw
++	}
++	if port := u.Port(); port != "" {
++		n, err := strconv.Atoi(port)
++		if err != nil || n < 1 || n > 65535 {
++			return raw
++		}
++	}
++	return number
++}
++
++func mu300NumericCaller(raw string) string {
++	var b strings.Builder
++	for _, c := range raw {
++		switch {
++		case c >= '0' && c <= '9':
++			b.WriteRune(c)
++		case c == '+' && b.Len() == 0:
++			b.WriteRune(c)
++		case c == '-' || c == '.' || c == '(' || c == ')' || c == ' ': // visual separators
++		default:
++			return ""
++		}
++	}
++	number := b.String()
++	digits := strings.TrimPrefix(number, "+")
++	if len(digits) == 0 || len(digits) > 20 {
++		return ""
++	}
++	return number
++}
++
++func mu300CallerIdentity(raw string) string {
++	value := mu300CallerNumber(raw)
++	if number := mu300NumericCaller(value); number != "" {
++		return "number:" + number
++	}
++	// normalizeDialNumber returns empty for every SIP URI. Treating all such
++	// results as equal would also merge genuinely different callers.
++	return "opaque:" + value
++}
+diff --git a/module/module-agent/mu300_caller_identity_test.go b/module/module-agent/mu300_caller_identity_test.go
+new file mode 100644
+index 0000000..ebd1735
+--- /dev/null
++++ b/module/module-agent/mu300_caller_identity_test.go
+@@ -0,0 +1,122 @@
++package main
++
++import (
++	"fmt"
++	"testing"
++	"time"
++)
++
++// Documentation-only addresses and synthetic subscribers; no real call I/O.
++func TestMU300SIPAnswerKeepsIncomingIdentity(t *testing.T) {
++	for _, firstIsURI := range []bool{true, false} {
++		t.Run(fmt.Sprint(firstIsURI), func(t *testing.T) {
++			plain, uri := "+12025550123", "sip:+12025550123@[2001:db8::1]"
++			first, second := uri, plain
++			if !firstIsURI {
++				first, second = plain, uri
++			}
++			state := fmt.Sprintf("+CLCC: 1,1,4,0,0,%q,145\nOK", first)
++			answers := 0
++			a := testMU300Calls(t, func(cmd string, _ time.Duration) (string, error) {
++				switch cmd {
++				case "AT+CLCC":
++					return state, nil
++				case "ATA":
++					answers++
++					state = fmt.Sprintf("+CLCC: 1,1,0,0,0,%q,145\nOK", second)
++					return "OK", nil
++				default:
++					t.Fatalf("unexpected command %q", cmd)
++					return "", nil
++				}
++			})
++			if _, err := a.mu300RefreshCalls(); err != nil {
++				t.Fatal(err)
++			}
++			id := a.calls.Active.ID
++			if err := a.answerCallForID(id); err != nil {
++				t.Fatalf("same caller rejected during answer: %v", err)
++			}
++			if answers != 1 || a.calls.Active.ID != id || a.calls.Active.AndroidID != id || a.calls.Active.State != "active" || len(a.calls.History) != 0 {
++				t.Fatal("answer replaced the logical call or emitted a false terminal event")
++			}
++			if a.calls.Active.Number != plain {
++				t.Fatal("SIP address leaked into display number")
++			}
++		})
++	}
++}
++
++func TestMU300CallerNumberProjection(t *testing.T) {
++	for _, tc := range []struct{ input, want string }{
++		{"sip:+12025550123@[2001:db8::1]", "+12025550123"},
++		{"SIPS:%2B1-202-555-0123@ims.example:5061;user=phone;transport=tls", "+12025550123"},
++		{"sip:12345@192.0.2.1:5060", "12345"},
++		{"sip:12345@[2001:db8::2]:5060;transport=udp", "12345"},
++		{"12345", "12345"},
++		{"+12025550123", "+12025550123"},
++		{"", ""},
++	} {
++		if got := mu300CallerNumber(tc.input); got != tc.want {
++			t.Errorf("%q: got %q want %q", tc.input, got, tc.want)
++		}
++	}
++	// Invalid, nontelephone, or semantically qualified addresses stay opaque.
++	for _, raw := range []string{
++		"sip:alice@ims.example", "sip:anonymous@anonymous.invalid",
++		"sip:12345:password@ims.example", "sip:12345;phone-context=example.org@ims.example",
++		"sip:12345;ext=1@ims.example", "sip:12345@ims.example;user=ip",
++		"sip:12345@ims.example;user=phone;user=ip", "sip:12345@ims.example;ext=1",
++		"sip:12345@", "sip:12345@[not-ipv6]", "sip:12345@2001:db8::1",
++		"sip:12345@ims.example:0", "sip:12345@ims.example:65536", "sip:12345@ims.example:",
++		"sip:12345@ims.example/path", "sip:12345@ims.example?header=value", "sip:12345@ims.example#",
++		"sip:12345@@ims.example", "sip:12%0A345@ims.example", "sip:12%ZZ345@ims.example",
++		"sip:12345@ims..example", "sip:12345@-ims.example", "sip:*123#@ims.example",
++		"sip:123456789012345678901@ims.example", "tel:12345;phone-context=example.org",
++	} {
++		if got := mu300CallerNumber(raw); got != raw {
++			t.Errorf("unsafe projection: %q => %q", raw, got)
++		}
++	}
++	if mu300CallerIdentity("sip:12345@ims.example") == mu300CallerIdentity("+12345") {
++		t.Fatal("guessed a country/global prefix")
++	}
++	if normalizeDialNumber("sip:12345@ims.example") != "" {
++		t.Fatal("SIP unexpectedly became dialable input")
++	}
++}
++
++func TestMU300SIPCallerReplacementStillRetiresOldID(t *testing.T) {
++	for _, tc := range []struct{ first, second string }{
++		{"sip:12345@[2001:db8::1]", "sip:54321@[2001:db8::1]"},
++		{"sip:alice@ims.example", "sip:bob@ims.example"},
++	} {
++		a := testMU300Calls(t, nil)
++		now := time.Now()
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: tc.first}}, now, true)
++		id := a.calls.Active.ID
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: tc.second}}, now.Add(time.Second), true)
++		if a.calls.Active.ID == id || len(a.calls.History) != 1 || a.calls.History[0].ID != id {
++			t.Fatal("a different SIP caller inherited the old identity")
++		}
++	}
++}
++
++func TestMU300SIPSameSubscriberDifferentHostKeepsIDButSlotReuseDoesNot(t *testing.T) {
++	a := testMU300Calls(t, nil)
++	now := time.Now()
++	poll := func(state, number string) {
++		now = now.Add(time.Second)
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: state, Number: number}}, now, true)
++	}
++	poll("incoming", "sip:12345@[2001:db8::1]")
++	id := a.calls.Active.ID
++	poll("active", "sip:12345@[2001:db8::2]")
++	if a.calls.Active.ID != id || len(a.calls.History) != 0 {
++		t.Fatal("IMS host change retired a live call")
++	}
++	poll("incoming", "sip:12345@[2001:db8::2]")
++	if a.calls.Active.ID == id || len(a.calls.History) != 1 {
++		t.Fatal("reused slot kept the connected call identity")
++	}
++}
 diff --git a/module/module-agent/mu300_calls.go b/module/module-agent/mu300_calls.go
 new file mode 100644
-index 0000000..561e97a
+index 0000000..71ed668
 --- /dev/null
 +++ b/module/module-agent/mu300_calls.go
-@@ -0,0 +1,448 @@
+@@ -0,0 +1,449 @@
 +package main
 +
 +import (
@@ -2046,11 +2338,12 @@ index 0000000..561e97a
 +	next := make(map[int]callRecord, len(calls))
 +	var changed, ended []callRecord
 +	for _, p := range calls {
++		p.Number = mu300CallerNumber(p.Number)
 +		old, exists := a.mu300Calls[p.Index]
 +		// A connected slot returning to setup, or changing direction, is a
 +		// replacement even if an idle poll was missed. Never reuse its UUID.
 +		replaced := exists && (old.Direction != p.Direction ||
-+			(old.Number != "" && p.Number != "" && normalizeDialNumber(old.Number) != normalizeDialNumber(p.Number)) ||
++			(old.Number != "" && p.Number != "" && mu300CallerIdentity(old.Number) != mu300CallerIdentity(p.Number)) ||
 +			((old.State == "active" || old.State == "held") &&
 +				(p.State == "incoming" || p.State == "waiting" || p.State == "dialing" || p.State == "alerting")))
 +		if !exists || replaced {
@@ -3472,6 +3765,259 @@ index 0000000..8c260fe
 +		t.Fatal("legacy fallback changed call")
 +	}
 +}
+diff --git a/module/module-agent/mu300_compat_test.go b/module/module-agent/mu300_compat_test.go
+new file mode 100644
+index 0000000..9e76d64
+--- /dev/null
++++ b/module/module-agent/mu300_compat_test.go
+@@ -0,0 +1,153 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"io"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestMU300SMSModesAndArguments(t *testing.T) {
++	for _, tc := range []struct{ script, profile, want string }{
++		{"#!/bin/sh\ncase $2 in --stdin) read number;; esac", "", "stdin"},
++		{"#!/bin/sh\n# --stdin is unsupported\ncase $1 in\nsend) die 'send needs a phone number and a text';;\nesac", "", "positional"},
++		{"#!/bin/sh\necho 'usage: mu300-sms send <number> <text>'", "auto", "positional"},
++		{"ELF fixture", "", "stdin"}, {"unrecognized", "positional", "positional"}, {"unrecognized", "stdin", "stdin"},
++	} {
++		mode, err := mu300SMSSendMode([]byte(tc.script), tc.profile)
++		if err != nil || mode != tc.want {
++			t.Fatalf("mode=%s %v want=%s", mode, err, tc.want)
++		}
++	}
++	if _, err := mu300SMSSendMode(nil, "shell"); err == nil {
++		t.Fatal("unknown mode")
++	}
++	input := "+15550000001\nfixture ' $(not-run)\nsecond line"
++	for _, mode := range []string{"stdin", "positional"} {
++		cmd, err := mu300SMSCommand(context.Background(), "/fixture/not-executed", mode, input)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if mode == "stdin" {
++			if !reflect.DeepEqual(cmd.Args, []string{"/fixture/not-executed", "send", "--stdin"}) {
++				t.Fatal(cmd.Args)
++			}
++			b, _ := io.ReadAll(cmd.Stdin)
++			if string(b) != input {
++				t.Fatal("stdin payload changed")
++			}
++		} else if !reflect.DeepEqual(cmd.Args, []string{"/fixture/not-executed", "send", "+15550000001", "fixture ' $(not-run)\nsecond line"}) || cmd.Stdin != nil {
++			t.Fatal("positional payload changed")
++		}
++	}
++	for _, input := range []string{"no delimiter", "bad;phone\ntext", "15550000001\n"} {
++		if _, err := mu300SMSCommand(context.Background(), "unused", "stdin", input); err == nil {
++			t.Fatal("invalid input")
++		}
++	}
++}
++func TestMU300SMSReceiptCompatibilityAndUncertainNoRetry(t *testing.T) {
++	for _, receipt := range []string{"sent (reference 7)\n", "submitting fixture\nsent (7)\r\n"} {
++		a := smsFixture(t)
++		calls := 0
++		a.mu300SMS.runSend = func(context.Context, string) (string, error) { calls++; return receipt, nil }
++		for i := 0; i < 2; i++ {
++			if n, err := a.mu300SendSMS("15550000001", "fixture"); err != nil || n != 1 {
++				t.Fatal(n, err)
++			}
++		}
++		if calls != 1 {
++			t.Fatal("duplicate submission")
++		}
++	}
++	for _, receipt := range []string{"", "prefix sent (7)", "sent (7)\nERROR", "sent (private)", "sent (reference 7) trailing"} {
++		if mu300SMSReceipt(receipt) {
++			t.Fatal("false receipt", receipt)
++		}
++	}
++	a := smsFixture(t)
++	calls := 0
++	a.mu300SMS.runSend = func(context.Context, string) (string, error) {
++		calls++
++		return "sent (7)", errors.New("private failure")
++	}
++	for i := 0; i < 2; i++ {
++		if _, err := a.mu300SendSMS("15550000001", "fixture"); err == nil || strings.Contains(err.Error(), "private failure") {
++			t.Fatal("uncertain result exposed or retried")
++		}
++	}
++	if calls != 1 {
++		t.Fatal("mode retried after uncertain outcome")
++	}
++}
++func TestMU300VendorSignalParsing(t *testing.T) {
++	for _, tc := range []struct {
++		body string
++		want int
++	}{
++		{`{"sig":{"rsrp":-95.6}}`, -96}, {`{"lte":{"rsrp":-110}}`, -110}, {`{"sig":{"rsrp":0},"lte":{"rsrp":-90}}`, -90},
++		{`{}`, 0}, {`null`, 0}, {`{"sig":{"rsrp":"-90"}}`, 0}, {`{"sig":{"rsrp":-140.1}}`, 0}, {`{"sig":{"rsrp":-29.9}}`, 0}, {`{"sig":{"rsrp":null}}`, 0}, {`{"sig":{"rsrp":-90}} trailing`, 0},
++	} {
++		got := parseMU300VendorSignal([]byte(tc.body))
++		if tc.want == 0 {
++			if got != nil {
++				t.Fatal(tc.body, *got)
++			}
++		} else if got == nil || *got != tc.want {
++			t.Fatal(tc.body, got)
++		}
++	}
++}
++func TestMU300MetadataFallbackOperatorAndStaleClear(t *testing.T) {
++	csq := "+CSQ: 20,99\nOK"
++	fail := false
++	a := testMU300Calls(t, func(command string, _ time.Duration) (string, error) {
++		if fail {
++			return "", errors.New("unavailable")
++		}
++		switch command {
++		case "AT+CPIN?":
++			return "+CPIN: READY\nOK", nil
++		case "AT+CEREG?":
++			return "+CEREG: 0,1\nOK", nil
++		case "AT+CSQ":
++			return csq, nil
++		case "AT+COPS?":
++			return "+COPS: 0,2,\"46001\"\nOK", nil
++		case "AT+CNUM":
++			return "OK", nil
++		default:
++			t.Fatal("unexpected command", command)
++			return "", nil
++		}
++	})
++	calls := 0
++	vendor := func() *int {
++		calls++
++		if !a.mu.TryLock() {
++			t.Fatal("vendor called under modem lock")
++		}
++		a.mu.Unlock()
++		n := -96
++		return &n
++	}
++	a.mu300RefreshModemWithSignal(vendor)
++	if calls != 0 || a.modem.SignalDBM == nil || *a.modem.SignalDBM != -73 || a.modem.SignalSource != "csq_rssi" || a.modem.Operator != "中国联通" {
++		t.Fatal(a.modem)
++	}
++	csq = "+CSQ: 99,99\nOK"
++	a.mu300RefreshModemWithSignal(vendor)
++	if calls != 1 || a.modem.SignalDBM == nil || *a.modem.SignalDBM != -96 || a.modem.SignalSource != "vendor_rsrp" {
++		t.Fatal(a.modem)
++	}
++	fail = true
++	a.mu300RefreshModemWithSignal(func() *int { return nil })
++	if a.modem.SignalDBM != nil || a.modem.SignalSource != "" || a.modem.Operator != "" || a.modem.SignalUpdatedAt == "" {
++		t.Fatal("stale metadata retained", a.modem)
++	}
++	a.applyCallPoll(parseCLCC(mu300TestActive+"OK"), time.Now())
++	a.mu300RefreshModemWithSignal(func() *int { t.Fatal("metadata polled during call"); return nil })
++}
+diff --git a/module/module-agent/mu300_device_compat.go b/module/module-agent/mu300_device_compat.go
+new file mode 100644
+index 0000000..196acc6
+--- /dev/null
++++ b/module/module-agent/mu300_device_compat.go
+@@ -0,0 +1,35 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++)
++
++// Normalize only an explicit Chinese international prefix. An unqualified
++// local number remains unchanged: neither the UI locale nor the device model
++// proves the SIM country. Do not change dial targets or SMS recipients here.
++var mu300ChinaSelfNumber = regexp.MustCompile(`^861[3-9][0-9]{9}$`)
++
++func normalizeMU300SelfNumber(number string) string {
++	number = strings.TrimSpace(number)
++	international := number
++	if strings.HasPrefix(international, "00") {
++		international = strings.TrimPrefix(international, "00")
++	}
++	if mu300ChinaSelfNumber.MatchString(international) {
++		return "+" + international
++	}
++	return number
++}
++func mu300SMSPool(root string) string {
++	for _, p := range []string{"/etc/mu300/sms-pool/msg", "/etc/mu300/sms/msg"} {
++		path := filepath.Join(root, p)
++		if st, err := os.Lstat(path); err == nil && st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
++			return path
++		}
++	}
++	// Do not create pool directories, follow symlinks or edit the native daemon.
++	return filepath.Join(root, "/etc/mu300/sms-pool/msg")
++}
+diff --git a/module/module-agent/mu300_device_compat_test.go b/module/module-agent/mu300_device_compat_test.go
+new file mode 100644
+index 0000000..e2c3e78
+--- /dev/null
++++ b/module/module-agent/mu300_device_compat_test.go
+@@ -0,0 +1,47 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestMU300SelfNumberPrefix(t *testing.T) {
++	for in, want := range map[string]string{"8615550001111": "+8615550001111", "008615550001111": "+8615550001111", "+8615550001111": "+8615550001111", "15550001111": "15550001111", "": "", "86123": "86123", "0086123": "0086123", "0033123456789": "0033123456789"} {
++		if got := normalizeMU300SelfNumber(in); got != want {
++			t.Errorf("normalization mismatch: %q", in)
++		}
++	}
++}
++func TestMU300SMSPoolKnownLayouts(t *testing.T) {
++	root := t.TempDir()
++	old := filepath.Join(root, "etc/mu300/sms-pool/msg")
++	next := filepath.Join(root, "etc/mu300/sms/msg")
++	if mu300SMSPool(root) != old {
++		t.Fatal("unexpected fallback")
++	}
++	if err := os.MkdirAll(next, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if mu300SMSPool(root) != next {
++		t.Fatal("new layout ignored")
++	}
++	if err := os.MkdirAll(filepath.Dir(old), 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink(next, old); err != nil {
++		t.Fatal(err)
++	}
++	if mu300SMSPool(root) != next {
++		t.Fatal("linked pool accepted")
++	}
++	if err := os.Remove(old); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(old, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if mu300SMSPool(root) != old {
++		t.Fatal("existing U30 layout priority changed")
++	}
++}
 diff --git a/module/module-agent/mu300_early_media.go b/module/module-agent/mu300_early_media.go
 new file mode 100644
 index 0000000..871fe76
@@ -4704,10 +5250,10 @@ index 0000000..22b9f57
 +}
 diff --git a/module/module-agent/mu300_resolve.go b/module/module-agent/mu300_resolve.go
 new file mode 100644
-index 0000000..59971e5
+index 0000000..3893172
 --- /dev/null
 +++ b/module/module-agent/mu300_resolve.go
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,92 @@
 +package main
 +
 +import (
@@ -4721,7 +5267,8 @@ index 0000000..59971e5
 +var mu300PushUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 +
 +// MU300 already publishes its stable local UUID as the push call_id. Only the
-+// independently generated call_uuid and generation need to be bound to it.
++// push call_uuid (legacy independent UUID or reused native UUID) and generation
++// need to be bound to it.
 +// Never recover missing push state from a number, timestamp or modem slot.
 +func (a *agent) mu300ResolvePushedCall(w http.ResponseWriter, r *http.Request) {
 +	if !requireMethod(w, r, http.MethodPost) {
@@ -4951,12 +5498,65 @@ index 0000000..cb34c3c
 +		t.Fatal("held call changed")
 +	}
 +}
+diff --git a/module/module-agent/mu300_signal.go b/module/module-agent/mu300_signal.go
+new file mode 100644
+index 0000000..ab676f2
+--- /dev/null
++++ b/module/module-agent/mu300_signal.go
+@@ -0,0 +1,47 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"math"
++	"os/exec"
++	"time"
++)
++
++// Native single-SIM read-only fallback. No modem write or metadata mutex is held.
++func mu300VendorSignalDBM() *int {
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	out, err := exec.CommandContext(ctx, "ubus", "call", "mu300.modem", "signal", `{"slot":"0"}`).Output()
++	if err != nil {
++		return nil
++	}
++	return parseMU300VendorSignal(out)
++}
++func parseMU300VendorSignal(out []byte) *int {
++	if len(out) > 65536 {
++		return nil
++	}
++	type block struct {
++		RSRP *float64 `json:"rsrp"`
++	}
++	var payload struct {
++		Sig *block `json:"sig"`
++		LTE *block `json:"lte"`
++	}
++	if json.Unmarshal(out, &payload) != nil {
++		return nil
++	}
++	for _, candidate := range []*block{payload.Sig, payload.LTE} {
++		if candidate == nil || candidate.RSRP == nil {
++			continue
++		}
++		value := *candidate.RSRP
++		if math.IsNaN(value) || math.IsInf(value, 0) || value < -140 || value > -30 {
++			continue
++		}
++		dbm := int(math.Round(value))
++		return &dbm
++	}
++	return nil
++}
 diff --git a/module/module-agent/mu300_sms.go b/module/module-agent/mu300_sms.go
 new file mode 100644
-index 0000000..0bea7ed
+index 0000000..a4bc1a6
 --- /dev/null
 +++ b/module/module-agent/mu300_sms.go
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,446 @@
 +package main
 +
 +import (
@@ -4970,7 +5570,6 @@ index 0000000..0bea7ed
 +	"io"
 +	"net/http"
 +	"os"
-+	"os/exec"
 +	"path/filepath"
 +	"regexp"
 +	"sort"
@@ -4994,10 +5593,10 @@ index 0000000..0bea7ed
 +
 +var mu300PoolID = regexp.MustCompile(`^[0-9]{1,12}$`)
 +var mu300SMSPhone = regexp.MustCompile(`^\+?[0-9]{1,20}$`)
-+var mu300SentReply = regexp.MustCompile(`^sent \(reference [0-9]+\)$`)
++var mu300SentReply = regexp.MustCompile(`^sent \((?:reference )?[0-9]+\)$`)
 +
 +func newMU300SMSBackend(dataDir string) *mu300SMSBackend {
-+	return &mu300SMSBackend{pool: "/etc/mu300/sms-pool/msg", state: filepath.Join(dataDir, "mu300-sms"), runSend: runMU300SMSSend}
++	return &mu300SMSBackend{pool: mu300SMSPool("/"), state: filepath.Join(dataDir, "mu300-sms"), runSend: runMU300SMSSend}
 +}
 +
 +func readMU300PrivateFile(path string, limit int64) ([]byte, error) {
@@ -5288,14 +5887,6 @@ index 0000000..0bea7ed
 +	Sent        bool   `json:"sent"`
 +}
 +
-+func runMU300SMSSend(ctx context.Context, input string) (string, error) {
-+	cmd := exec.CommandContext(ctx, "/opt/mu300/bin/mu300-sms", "send", "--stdin")
-+	cmd.Stdin = strings.NewReader(input)
-+	// Never surface native stdout/stderr: it can contain a number or message.
-+	out, err := cmd.Output()
-+	return string(out), err
-+}
-+
 +func (a *agent) mu300SendSMS(phone, text string) (int, error) {
 +	if !mu300SMSPhone.MatchString(phone) || !utf8.ValidString(text) || strings.TrimSpace(text) == "" || utf8.RuneCountInString(text) > 70 {
 +		return 0, errors.New("MU300 SMS requires a valid number and 1-70 characters")
@@ -5344,7 +5935,7 @@ index 0000000..0bea7ed
 +	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
 +	defer cancel()
 +	out, err := b.runSend(ctx, phone+"\n"+text)
-+	if err != nil || !mu300SentReply.MatchString(strings.TrimSpace(out)) {
++	if err != nil || !mu300SMSReceipt(out) {
 +		return 0, errors.New("SMS submission not confirmed; check recipient before retrying; no automatic resend")
 +	}
 +	state.Sent = true
@@ -5519,6 +6110,108 @@ index 0000000..5b1a8e1
 +	if err != nil || !sent || received.SIMSlot != "SIM 1" {
 +		t.Fatalf("slot delivery: %v %v %q", sent, err, received.SIMSlot)
 +	}
++}
+diff --git a/module/module-agent/mu300_sms_compat.go b/module/module-agent/mu300_sms_compat.go
+new file mode 100644
+index 0000000..a5e4871
+--- /dev/null
++++ b/module/module-agent/mu300_sms_compat.go
+@@ -0,0 +1,96 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"io"
++	"os"
++	"os/exec"
++	"regexp"
++	"strings"
++)
++
++// Select once before submission; never probe by submitting or retry another mode.
++// The optional root-owned profile also supports vendor scripts with unknown syntax.
++const mu300SMSModePath = "/etc/mu300/airsim-sms-send-mode"
++
++var mu300StdinOption = regexp.MustCompile(`(?m)(?:^|[; \t])(?:["']?--stdin["']?\s*\)|[^\n]*[=!]=?\s*["']--stdin["'])`)
++var mu300PositionalUsage = regexp.MustCompile(`(?i)send\s+(?:<|\[)?(?:num|number|phone)(?:>|\])?\s+(?:<|\[)?(?:text|message)(?:>|\])?`)
++
++func mu300SMSSendMode(script []byte, configured string) (string, error) {
++	switch configured {
++	case "stdin", "positional":
++		return configured, nil
++	case "", "auto":
++	default:
++		return "", errors.New("invalid native SMS send mode")
++	}
++	// Unknown/binary wrappers retain the original stdin contract; no speculative
++	// positional submission. A failed stdin invocation is never auto-retried.
++	if !strings.HasPrefix(string(script), "#!") {
++		return "stdin", nil
++	}
++	var lines []string
++	for _, line := range strings.Split(string(script), "\n") {
++		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
++			lines = append(lines, line)
++		}
++	}
++	code := strings.Join(lines, "\n")
++	if mu300StdinOption.MatchString(code) {
++		return "stdin", nil
++	}
++	if mu300PositionalUsage.MatchString(code) || (strings.Contains(code, "send)") && strings.Contains(code, "send needs a phone number and a text")) {
++		return "positional", nil
++	}
++	return "stdin", nil
++}
++func mu300SMSCommand(ctx context.Context, executable, mode, input string) (*exec.Cmd, error) {
++	phone, text, ok := strings.Cut(input, "\n")
++	if !ok || !mu300SMSPhone.MatchString(phone) || text == "" {
++		return nil, errors.New("invalid SMS send input")
++	}
++	switch mode {
++	case "stdin":
++		cmd := exec.CommandContext(ctx, executable, "send", "--stdin")
++		cmd.Stdin = strings.NewReader(input)
++		return cmd, nil
++	case "positional":
++		// exec args, not a shell string. This vendor API exposes its arguments to local
++		// process inspection; stdout/stderr are never returned to clients or logged.
++		return exec.CommandContext(ctx, executable, "send", phone, text), nil
++	}
++	return nil, errors.New("invalid SMS send mode")
++}
++func runMU300SMSSend(ctx context.Context, input string) (string, error) {
++	const executable = "/opt/mu300/bin/mu300-sms"
++	configured, err := readMU300PrivateFile(mu300SMSModePath, 64)
++	if err != nil && !errors.Is(err, os.ErrNotExist) {
++		return "", errors.New("native SMS send profile unavailable")
++	}
++	var script []byte
++	if f, e := os.Open(executable); e == nil {
++		script, _ = io.ReadAll(io.LimitReader(f, 262145))
++		f.Close()
++	}
++	if len(script) > 262144 {
++		script = nil
++	}
++	mode, err := mu300SMSSendMode(script, strings.TrimSpace(string(configured)))
++	if err != nil {
++		return "", err
++	}
++	cmd, err := mu300SMSCommand(ctx, executable, mode, input)
++	if err != nil {
++		return "", err
++	}
++	out, err := cmd.Output()
++	return string(out), err
++}
++
++// Only a complete final receipt line plus successful process exit is accepted.
++// Earlier diagnostic output may mention recipients; never expose that output.
++func mu300SMSReceipt(out string) bool {
++	lines := strings.Split(strings.TrimSpace(out), "\n")
++	return mu300SentReply.MatchString(strings.TrimSpace(lines[len(lines)-1]))
 +}
 diff --git a/module/module-agent/mu300_sms_identity_test.go b/module/module-agent/mu300_sms_identity_test.go
 new file mode 100644
@@ -6788,10 +7481,10 @@ index 0000000..653f3c3
 +}
 diff --git a/module/module-agent/mu300_watch.go b/module/module-agent/mu300_watch.go
 new file mode 100644
-index 0000000..c08a0aa
+index 0000000..5d3913a
 --- /dev/null
 +++ b/module/module-agent/mu300_watch.go
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,191 @@
 +package main
 +
 +import (
@@ -6813,6 +7506,7 @@ index 0000000..c08a0aa
 +	Instance, Owner string
 +	Until           time.Time
 +	HangupAttempted bool
++	Terminal        bool // latched only from confirmed history for this immutable instance
 +	Notified        string
 +}
 +
@@ -6850,10 +7544,6 @@ index 0000000..c08a0aa
 +		if r.Context().Err() != nil {
 +			return
 +		}
-+		if a.mu300ControlSnapshot() != nil {
-+			http.Error(w, "unconfirmed", 409)
-+			return
-+		}
 +		a.mu300WatchMu.Lock()
 +	}
 +	defer a.mu300WatchMu.Unlock()
@@ -6870,6 +7560,15 @@ index 0000000..c08a0aa
 +		}
 +	}
 +	binding := a.mu300WatchBindings[id]
++	// Once this exact binding has terminal evidence, a failed later modem poll
++	// or another call must not erase it. Never synthesize terminal from absence.
++	terminal := binding != nil && (binding.Terminal || a.mu300WatchState(binding.Instance) == "ended")
++	if action != "check" && !terminal {
++		if a.mu300ControlSnapshot() != nil {
++			http.Error(w, "unconfirmed", 409)
++			return
++		}
++	}
 +	if binding == nil {
 +		if action == "check" || a.push == nil {
 +			http.Error(w, "unknown", 409)
@@ -6897,6 +7596,9 @@ index 0000000..c08a0aa
 +		a.mu300WatchBindings[id] = binding
 +	}
 +	state := a.mu300WatchState(binding.Instance)
++	if terminal {
++		state = "ended"
++	}
 +	if action == "answer" {
 +		if binding.Owner != "" && binding.Owner != owner {
 +			http.Error(w, "owned", 409)
@@ -6929,6 +7631,9 @@ index 0000000..c08a0aa
 +		http.Error(w, "owned", 403)
 +		return
 +	}
++	if state == "ended" {
++		binding.Terminal = true
++	}
 +	if binding.Owner == owner && state == "incoming" {
 +		state = "connecting"
 +	}
@@ -6943,13 +7648,13 @@ index 0000000..c08a0aa
 +func (a *agent) mu300WatchState(instance string) string {
 +	a.mu.RLock()
 +	defer a.mu.RUnlock()
-+	age := time.Since(a.mu300EarlyPollAt)
-+	if a.mu300EarlyPollAt.IsZero() || age < 0 || age > 2500*time.Millisecond {
-+		return "unknown"
-+	}
 +	for _, c := range a.mu300Calls {
 +		if c.ID != instance {
 +			continue
++		}
++		age := time.Since(a.mu300EarlyPollAt)
++		if a.mu300EarlyPollAt.IsZero() || age < 0 || age > 2500*time.Millisecond {
++			return "unknown"
 +		}
 +		if c.Direction != "incoming" || !a.mu300GoneSince[c.ID].IsZero() {
 +			return "unknown"
@@ -6970,6 +7675,175 @@ index 0000000..c08a0aa
 +		}
 +	}
 +	return "unknown"
++}
+diff --git a/module/module-agent/mu300_watch_increment_test.go b/module/module-agent/mu300_watch_increment_test.go
+new file mode 100644
+index 0000000..d16c082
+--- /dev/null
++++ b/module/module-agent/mu300_watch_increment_test.go
+@@ -0,0 +1,163 @@
++package main
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestMU300PushNativeUUIDAndLegacyRetryIdentity(t *testing.T) {
++	for _, scenario := range []string{"native", "uppercase", "opaque", "legacy-retry", "other-profile"} {
++		t.Run(scenario, func(t *testing.T) {
++			received := make(chan incomingPushEvent, 4)
++			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				var v incomingPushEvent
++				if json.NewDecoder(r.Body).Decode(&v) != nil {
++					w.WriteHeader(400)
++					return
++				}
++				received <- v
++				w.WriteHeader(202)
++			}))
++			defer server.Close()
++			p := newPushManager(filepath.Join(t.TempDir(), "push.json"))
++			deliveries := make(chan cloudCallDescriptor, 4)
++			p.onCallDelivered = func(d cloudCallDescriptor) { deliveries <- d }
++			p.client = server.Client()
++			if err := p.store(testPushRegistration(server.URL)); err != nil {
++				t.Fatal(err)
++			}
++			id := "8c2d3456-1234-4abc-9def-0123456789ab"
++			profile := "mu300-openwrt"
++			if scenario == "uppercase" {
++				id = strings.ToUpper(id)
++			}
++			if scenario == "opaque" {
++				id = "legacy-call-17"
++			}
++			if scenario == "other-profile" {
++				profile = "android-avf"
++			}
++			c := callRecord{ID: id, AndroidID: id, Direction: "incoming", State: "incoming"}
++			if scenario == "legacy-retry" {
++				p.lastCallID = id
++				p.lastUUID = resolveTestUUID
++				p.lastSecret = "existing-secret"
++				p.lastGeneration = 9
++			}
++			if sent, err := p.sendIncomingForProfile(c, time.Now(), profile); err != nil || !sent {
++				t.Fatal(sent, err)
++			}
++			got := <-received
++			select {
++			case d := <-deliveries:
++				if d.CallID != got.CallID || d.CallUUID != got.CallUUID || d.Generation != got.Generation || d.CallSecret != got.CallSecret {
++					t.Fatal("cloud descriptor differs from push tuple")
++				}
++			case <-time.After(3 * time.Second):
++				t.Fatal("cloud descriptor not delivered")
++			}
++			if got.CallID != id || !mu300PushUUID.MatchString(got.CallUUID) || got.Generation == 0 {
++				t.Fatal("identity lost", got)
++			}
++			switch scenario {
++			case "native", "uppercase":
++				if got.CallUUID != strings.ToLower(id) {
++					t.Fatal("LAN/push UUID differ")
++				}
++			case "opaque", "other-profile":
++				if got.CallUUID == strings.ToLower(id) {
++					t.Fatal("legacy profile or opaque ID coerced")
++				}
++			case "legacy-retry":
++				if got.CallUUID != resolveTestUUID || got.Generation != 9 || got.CallSecret != "existing-secret" {
++					t.Fatal("in-flight legacy tuple rewritten")
++				}
++			}
++			// Simulate retry after an unconfirmed delivery, then suppress its duplicate.
++			p.mu.Lock()
++			p.callDelivered = false
++			p.mu.Unlock()
++			if _, err := p.sendIncomingForProfile(c, time.Now(), profile); err != nil {
++				t.Fatal(err)
++			}
++			again := <-received
++			if again.CallUUID != got.CallUUID || again.Generation != got.Generation || again.CallSecret != got.CallSecret {
++				t.Fatal("retry changed tuple")
++			}
++			if sent, err := p.sendIncomingForProfile(c, time.Now(), profile); err != nil || sent {
++				t.Fatal("duplicate delivery")
++			}
++		})
++	}
++}
++
++func TestWatchConfirmedTerminalSurvivesFailedPollAndNewCall(t *testing.T) {
++	polls := 0
++	a := testMU300Calls(t, func(cmd string, _ time.Duration) (string, error) {
++		polls++
++		return "", errors.New("fixture modem unavailable")
++	})
++	owner := "wlan:" + strings.Repeat("a", 64)
++	id := watchIdentity{"fixture-agent", "native-ended", resolveTestUUID, 7}
++	a.mu300WatchBindings = map[watchIdentity]*watchBinding{id: {Instance: id.CallID, Owner: owner, Until: time.Now().Add(time.Hour)}}
++	ended := time.Now().Add(-time.Minute)
++	a.calls.History = []callRecord{{ID: id.CallID, EndedAt: &ended}}
++	a.mu300EarlyPollAt = time.Now().Add(-time.Hour)
++	for _, action := range []string{"status", "hangup", "answer", "check", "status"} {
++		w := watchCall(a, action, owner, id)
++		if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"ended"`) {
++			t.Fatal(action, w.Code, w.Body.String())
++		}
++	}
++	if polls != 0 {
++		t.Fatal("terminal confirmation queried modem or re-sent mutation", polls)
++	}
++	// Bounded call history may rotate while the binding remains within its TTL.
++	a.calls.History = nil
++	a.applyCallPoll(parseCLCC("+CLCC: 1,1,4,0,0\nOK"), time.Now())
++	next := a.calls.Active.ID
++	w := watchCall(a, "hangup", owner, id)
++	if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"ended"`) || a.calls.Active.ID != next || polls != 0 {
++		t.Fatal("late hangup touched next call", w.Code, w.Body.String())
++	}
++	for _, wrong := range []watchIdentity{{id.AgentID, id.CallID, id.CallUUID, 8}, {"other-agent", id.CallID, id.CallUUID, 7}, {id.AgentID, "other-call", id.CallUUID, 7}, {id.AgentID, id.CallID, "491eae43-89f7-4baa-a21e-e15beecbe584", 7}} {
++		w = watchCall(a, "check", owner, wrong)
++		if w.Code == 200 {
++			t.Fatal("terminal leaked across tuple")
++		}
++	}
++	w = watchCall(a, "status", "wlan:"+strings.Repeat("b", 64), id)
++	if w.Code == 200 {
++		t.Fatal("terminal disclosed to other owner")
++	}
++	a.mu300WatchBindings[id].Until = time.Now().Add(-time.Second)
++	if watchCall(a, "check", owner, id).Code == 200 {
++		t.Fatal("expired binding resurrected")
++	}
++}
++
++func TestWatchMissingInstanceOrStaleLiveCallIsNotTerminal(t *testing.T) {
++	a := testMU300Calls(t, func(string, time.Duration) (string, error) { return "", errors.New("fixture timeout") })
++	owner := "wlan:" + strings.Repeat("a", 64)
++	id := watchIdentity{"fixture-agent", "not-observed", resolveTestUUID, 7}
++	a.mu300WatchBindings = map[watchIdentity]*watchBinding{id: {Instance: id.CallID, Owner: owner, Until: time.Now().Add(time.Hour)}}
++	now := time.Now()
++	a.calls.History = []callRecord{{ID: "different-ended-call", EndedAt: &now}}
++	a.mu300EarlyPollAt = now
++	w := watchCall(a, "check", owner, id)
++	if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"unknown"`) {
++		t.Fatal("absence inferred terminal", w.Code, w.Body.String())
++	}
++	if watchCall(a, "status", owner, id).Code != 409 {
++		t.Fatal("failed sample accepted")
++	}
++	if a.mu300WatchBindings[id].Terminal {
++		t.Fatal("unknown latched as ended")
++	}
 +}
 diff --git a/module/module-agent/mu300_watch_test.go b/module/module-agent/mu300_watch_test.go
 new file mode 100644
@@ -7118,7 +7992,7 @@ index 0000000..cdf375f
 +	}
 +}
 diff --git a/module/module-agent/push.go b/module/module-agent/push.go
-index dabc119..c28e261 100644
+index dabc119..af8b4a8 100644
 --- a/module/module-agent/push.go
 +++ b/module/module-agent/push.go
 @@ -33,6 +33,7 @@ type pushRegistration struct {
@@ -7289,7 +8163,41 @@ index dabc119..c28e261 100644
  	if registration.CloudEnabled != nil && !*registration.CloudEnabled {
  		return nil
  	}
-@@ -601,9 +627,10 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+@@ -501,6 +527,10 @@ func (p *pushManager) sendRegistration() error {
+ }
+ 
+ func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error) {
++	return p.sendIncomingForProfile(call, now, "")
++}
++
++func (p *pushManager) sendIncomingForProfile(call callRecord, now time.Time, profile string) (bool, error) {
+ 	if call.Direction != "incoming" || (call.State != "incoming" && call.State != "waiting") {
+ 		return false, nil
+ 	}
+@@ -522,10 +552,18 @@ func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error)
+ 		generation = p.lastGeneration
+ 	} else {
+ 		var err error
+-		uuid, err = randomUUID()
+-		if err != nil {
+-			p.mu.Unlock()
+-			return false, err
++		// MU300 LAN already exposes an immutable per-call UUID. Use it for
++		// both iPhone/Watch pushes; old opaque IDs retain a separate push UUID.
++		// Existing retry tuples above are never rewritten mid-call.
++		nativeUUID := strings.ToLower(call.ID)
++		if profile == "mu300-openwrt" && mu300PushUUID.MatchString(nativeUUID) {
++			uuid = nativeUUID
++		} else {
++			uuid, err = randomUUID()
++			if err != nil {
++				p.mu.Unlock()
++				return false, err
++			}
+ 		}
+ 		secret, err = randomCallSecret()
+ 		if err != nil {
+@@ -601,9 +639,10 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
  	p.mu.Unlock()
  
  	payload := incomingSMSPushEvent{
@@ -7302,7 +8210,7 @@ index dabc119..c28e261 100644
  		Timestamp: message.Timestamp.UTC().Format(time.RFC3339Nano),
  	}
  	err := p.postJSON(client, registration.RelayURL+"/v1/events/sms", payload)
-@@ -626,8 +653,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+@@ -626,8 +665,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
  	return true, nil
  }
  
@@ -7313,7 +8221,7 @@ index dabc119..c28e261 100644
  		(owner != "watch" && owner != "iphone") ||
  		(phase != "active" && phase != "ended") {
  		return errors.New("通话所有权事件无效")
-@@ -636,7 +663,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
+@@ -636,7 +675,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
  	registration := p.config
  	client := p.client
  	cloudEnabled := p.cloudEnabledLocked()
@@ -7321,7 +8229,7 @@ index dabc119..c28e261 100644
  	p.mu.Unlock()
  	if !cloudEnabled || registration.RelayURL == "" || registration.AlertToken == "" {
  		return nil
-@@ -698,17 +724,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
+@@ -698,17 +736,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
  	if !cloudEnabled || registration.RelayURL == "" {
  		return nil
  	}
@@ -7346,6 +8254,15 @@ index dabc119..c28e261 100644
  	})
  }
  
+@@ -925,7 +968,7 @@ func (a *agent) scheduleIncomingPush(callID string) {
+ 			if attempt > 0 {
+ 				time.Sleep(time.Duration(1<<attempt) * time.Second)
+ 			}
+-			if _, err := a.push.sendIncoming(call, time.Now()); err == nil {
++			if _, err := a.push.sendIncomingForProfile(call, time.Now(), a.profile.Name); err == nil {
+ 				return
+ 			} else {
+ 				lastErr = err
 diff --git a/module/module-agent/push_test.go b/module/module-agent/push_test.go
 index aa500fc..9284db5 100644
 --- a/module/module-agent/push_test.go

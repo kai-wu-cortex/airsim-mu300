@@ -64,3 +64,18 @@ TTL 与续租/重复申请/单次消费语义、incoming owner 的建立、取�
 - 发布前仍须 Go race/vet、隔离 Agent、所有 Node、包/源码/许可及只读设备预检。
 - 真机验收另记：Watch 锁屏接听、其他设备接听后停止响铃、双向听感、挂断释放、短信回复、
   取消配对与网络切换。目前以上新增能力全部 NOT TESTED；本次代码评估没有硬件验收结论。
+
+
+## 2026-11-13 增量核对结果（develop，未发布）
+
+收到 AirSIM `5904e0e` 的协议交接后，只核对并修复 U30 固定 Agent 补丁与网关测试：
+
+1. 原 `sendIncoming` 为 MU300 原生 UUID 再生成独立 `call_uuid`。新增 profile 隔离分支复用有效 UUID，保留旧非 UUID ID、其他 profile 和已存在的重试 tuple。
+2. 原 Watch status/hangup 总是先读基带，且历史终态也受最新采样时限影响。已确认挂断后若基带读取失败，就不能为客户端提供终态确认。改为只对已绑定且有精确历史证据的 instance 保留终态；空列表、另一通电话、失败/陈旧快照均不作为终态证据。
+3. 网关没有新增 API 或字段，补充真实签名 HTTP dispatcher 测试，验证 terminal 响应绑定原 tuple、不签发 grant；unknown/error/错误代次不返回已结束。
+
+测试过程中曾有一项“不同 UUID”夹具误用了原 UUID；已纠正为确实不同的 UUID，保留四个 tuple 维度的逐项隔离断言。没有通过放宽实现来消除该失败。
+
+保留 `c7bdc00`、`9f5c5ee`、本工作树既有 UI/7.3 内核适配及其他未提交变更。不修改 AirSIM 工作树；不安装、重启、拨号、发送短信、部署或发布。
+
+本轮验证通过：插件 Go race/vet、全新隔离 Agent Go race/vet（完整包测试 8.328 秒）、65 项 Node 测试、Linux ARM64 双二进制构建及 `git diff --check`。固定基线仍为 `cc2ade3124ac34bec7d8c441f4b66a57a6dfec62`，补丁可重新应用到干净导出树。未提交、推送、安装或发布；上述结果不替代 Watch／U30 实机验收。

@@ -1,7 +1,43 @@
 {
- "luci-app-airsim": {
-  "description": "Manage AirSIM for MU300",
-  "read": {"ubus": {"airsim": ["status", "settings_get", "diagnostics", "updates_status"]}},
-  "write": {"ubus": {"airsim": ["settings_save", "updates", "updates_policy", "update_install", "pair_start", "pair_cancel", "number_refresh", "start", "stop", "call_action"], "mu300dash": ["sms_list", "sms_show", "sms_send", "sms_job"]}}
- }
+  "luci-app-airsim": {
+    "description": "Manage AirSIM for MU300",
+    "read": {
+      "ubus": {
+        "airsim": [
+          "pair_clients",
+          "kernel_status",
+          "status",
+          "settings_get",
+          "diagnostics",
+          "updates_status",
+          "device_read",
+          "sms_list"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "airsim": [
+          "pair_remove",
+          "settings_save",
+          "updates",
+          "updates_policy",
+          "update_install",
+          "pair_start",
+          "pair_cancel",
+          "number_refresh",
+          "start",
+          "stop",
+          "call_action",
+          "device_write",
+          "sms_send"
+        ],
+        "mu300dash": [
+          "sms_list",
+          "sms_show",
+          "sms_job"
+        ]
+      }
+    }
+  }
 }

@@ -348,6 +348,16 @@ func checkUpdates(ctx context.Context, previews bool) (map[string]any, error) {
 }
 
 func managementCommand(action, data string) any {
+	if action == "sms-send" {
+		return deviceSMSSend(data)
+	}
+	if action == "device-read" || action == "device-write" {
+		return deviceManagement(action, data)
+	}
+	// Inventory is available even when service settings cannot be read.
+	if action == "kernel-status" {
+		return inspectKernel("/")
+	}
 	if action == "updates-status" || action == "updates-policy" || action == "update-install" {
 		return updateManagement(action, data)
 	}

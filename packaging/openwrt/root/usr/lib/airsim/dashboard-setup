@@ -1,0 +1,29 @@
+#!/bin/sh
+# Device-local, reversible presentation adapter. Never rewrite the firmware view.
+set -eu
+root=${AIRSIM_DASHBOARD_ROOT:-}
+source=$root/www/luci-static/resources/view/mu300/home.js
+native=$root/www/luci-static/resources/view/airsim_native_home.js
+menu=$root/usr/share/luci/menu.d/zz-airsim-home.json
+clear_adapter() {
+ rm -f "$menu" "$native" "$root/tmp/luci-indexcache" "$root"/tmp/luci-indexcache.*
+}
+if [ "${1:-}" = --remove ]; then clear_adapter; exit 0; fi
+[ "${1:-}" = --install ] || exit 2
+# Only this reviewed homepage is supported. Unknown firmware keeps its own home.
+expected=c5afc68607ae8fa4c1a86faeb988f954e51d6d5d77ec120c2c8200f7dc3d0f4a
+if [ ! -f "$source" ] || [ "$(sha256sum "$source" | cut -d' ' -f1)" != "$expected" ]; then
+ clear_adapter
+ echo 'AirSIM: native dashboard version not reviewed; original homepage retained.'
+ exit 0
+fi
+tmp=$(mktemp "$native.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+# Suppress view auto-mounting; the AirSIM route is the sole LuCI view instance.
+sed -e "s/^'require view';$/'require baseclass';/" -e 's/^return view.extend({$/return baseclass.extend({/' "$source" > "$tmp"
+chmod 644 "$tmp"
+mv "$tmp" "$native"
+cp "$root/usr/lib/airsim/dashboard-menu.json" "$menu"
+chmod 644 "$menu"
+rm -f "$root/tmp/luci-indexcache" "$root"/tmp/luci-indexcache.*
+echo 'AirSIM: homepage controls enabled; native dashboard source preserved.'

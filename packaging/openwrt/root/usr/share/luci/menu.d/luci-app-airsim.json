@@ -1,16 +1,116 @@
 {
- "admin/services/airsim": {
-  "title": "AirSIM",
-  "order": 55,
-  "action": {"type": "firstchild"},
-  "depends": {"acl": ["luci-app-airsim"]}
- },
- "admin/services/airsim/overview": {
-  "title": "设备概览", "order": 10,
-  "action": {"type": "view", "path": "airsim/overview"}
- },
- "admin/services/airsim/manage": {
-  "title": "管理与维护", "order": 20,
-  "action": {"type": "view", "path": "airsim/manage"}
- }
+  "admin/services/airsim": {
+    "title": "AirSIM",
+    "order": 55,
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-airsim"
+      ]
+    }
+  },
+  "admin/services/airsim/overview": {
+    "title": "设备概览",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "airsim/overview"
+    }
+  },
+  "admin/services/airsim/connect": {
+    "title": "连接",
+    "order": 11,
+    "action": {
+      "type": "view",
+      "path": "airsim/connect"
+    }
+  },
+  "admin/services/airsim/net": {
+    "title": "联网",
+    "order": 12,
+    "action": {
+      "type": "view",
+      "path": "airsim/net"
+    }
+  },
+  "admin/services/airsim/call": {
+    "title": "来电转发",
+    "order": 13,
+    "action": {
+      "type": "view",
+      "path": "airsim/call"
+    }
+  },
+  "admin/services/airsim/sms": {
+    "title": "短信",
+    "order": 14,
+    "action": {
+      "type": "view",
+      "path": "airsim/messages"
+    }
+  },
+  "admin/services/airsim/maintenance": {
+    "title": "维护",
+    "order": 15,
+    "action": {
+      "type": "view",
+      "path": "airsim/maintenance"
+    }
+  },
+  "admin/services/airsim/settings": {
+    "title": "外观与设置",
+    "order": 16,
+    "action": {
+      "type": "view",
+      "path": "airsim/settings"
+    }
+  },
+  "admin/services/airsim/bluetooth": {
+    "title": "蓝牙",
+    "order": 17,
+    "action": {
+      "type": "view",
+      "path": "airsim/bluetooth"
+    }
+  },
+  "admin/services/airsim/audio": {
+    "title": "音频",
+    "order": 18,
+    "action": {
+      "type": "view",
+      "path": "airsim/audio"
+    }
+  },
+  "admin/services/airsim/clients": {
+    "action": {
+      "type": "view",
+      "path": "airsim/clients"
+    }
+  },
+  "admin/services/airsim/manage": {
+    "action": {
+      "type": "view",
+      "path": "airsim/connect"
+    }
+  },
+  "admin/services/airsim/extensions": {
+    "action": {
+      "type": "view",
+      "path": "airsim/net"
+    }
+  },
+  "admin/services/airsim/kernel": {
+    "action": {
+      "type": "view",
+      "path": "airsim/audio"
+    }
+  },
+  "admin/services/airsim/messages": {
+    "action": {
+      "type": "view",
+      "path": "airsim/messages"
+    }
+  }
 }

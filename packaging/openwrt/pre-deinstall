@@ -3,6 +3,9 @@ if wget -q -T 2 -O - http://127.0.0.1:7581/status 2>/dev/null | jsonfilter -e '@
 	echo 'Finish the AirSIM call before uninstalling.' >&2
 	exit 1
 fi
+if [ -x /usr/lib/airsim/dashboard-setup ]; then
+ /usr/lib/airsim/dashboard-setup --remove
+fi
 if [ -x /etc/init.d/airsim ]; then
 	/etc/init.d/airsim stop >/dev/null 2>&1
 	/etc/init.d/airsim disable
@@ -10,6 +13,9 @@ fi
 if [ -x /etc/init.d/airsim-update ]; then
 	/etc/init.d/airsim-update stop >/dev/null 2>&1
 	/etc/init.d/airsim-update disable >/dev/null 2>&1
+fi
+if [ -x /etc/init.d/airsim-device-settings ]; then
+ /etc/init.d/airsim-device-settings disable >/dev/null 2>&1
 fi
 if [ -x /etc/init.d/airsim-audio-setup ]; then
  /etc/init.d/airsim-audio-setup disable >/dev/null 2>&1

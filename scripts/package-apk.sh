@@ -2,12 +2,16 @@
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=$(cat "$HERE/VERSION")
+PACKAGE_OUT=${AIRSIM_PACKAGE_OUT:-dist}
+case "$PACKAGE_OUT" in /*|*..*|*[!a-zA-Z0-9_./-]*|'') echo 'Invalid package output directory' >&2; exit 1 ;; esac
+PACKAGE_DIR=$HERE/$PACKAGE_OUT
 LICENSES='PolyForm-Noncommercial-1.0.0 AND GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later AND MIT AND BSD-3-Clause'
 sh "$HERE/scripts/build.sh"
 sh "$HERE/scripts/fetch-deps.sh"
 sh "$HERE/scripts/fetch-sources.sh"
 STAGE=$(mktemp -d "$HERE/out/package.XXXXXX")
 cp -R "$HERE/packaging/openwrt/root/." "$STAGE/"
+node "$HERE/scripts/stamp-ui.mjs" "$STAGE"
 cp "$HERE/out/linux-arm64/airsim-agent" "$HERE/out/linux-arm64/airsim-mu300d" "$STAGE/usr/lib/airsim/"
 cp "$HERE/VERSION" "$STAGE/usr/lib/airsim/VERSION"
 POST_INSTALL=/work/packaging/openwrt/post-install
@@ -37,13 +41,15 @@ if [ "${AIRSIM_COMPLETE_INSTALL:-1}" = 1 ]; then
 else
  rm -f "$STAGE/etc/init.d/airsim-audio-setup"
 fi
-mkdir -p "$STAGE/usr/lib/airsim/alsa" "$STAGE/usr/lib/airsim/bin" "$HERE/dist"
+mkdir -p "$STAGE/usr/lib/airsim/alsa" "$STAGE/usr/lib/airsim/bin" "$PACKAGE_DIR"
 mkdir -p "$STAGE/usr/share/doc/airsim"
 cp "$HERE/THIRD_PARTY_NOTICES.md" "$STAGE/usr/share/doc/airsim/"
 cp "$HERE/out/upstream-notices/LICENSE" "$STAGE/usr/share/doc/airsim/AirSIM-LICENSE"
 cp "$HERE/out/upstream-notices/NOTICE" "$STAGE/usr/share/doc/airsim/AirSIM-NOTICE"
 cp "$HERE/out/upstream-notices/THIRD_PARTY_NOTICES.md" "$STAGE/usr/share/doc/airsim/AirSIM-THIRD_PARTY_NOTICES.md"
 cp "$HERE/LICENSE" "$HERE/NOTICE" "$HERE/SOURCES.md" "$STAGE/usr/share/doc/airsim/"
+cp "$HERE/docs/PCM_GAIN.md" "$HERE/docs/RELEASE_v$VERSION.md" "$STAGE/usr/share/doc/airsim/"
+cp "$HERE/docs/KERNEL_SELECTION.md" "$HERE/patches/mu300-update-7.3.patch" "$STAGE/usr/share/doc/airsim/"
 cp -R "$HERE/licenses" "$STAGE/usr/share/doc/airsim/"
 cp -R "$HERE/out/dependency-licenses" "$STAGE/usr/share/doc/airsim/"
 # License texts come from the pinned source archives, not an unpublished sibling checkout.
@@ -63,14 +69,15 @@ for cmd in amixer aplay arecord; do
 	cp "$HERE/packaging/openwrt/alsa-wrapper" "$STAGE/usr/lib/airsim/bin/$cmd"
 done
 find "$STAGE" -type d -exec chmod 755 {} +
+chmod 755 "$STAGE/usr/lib/airsim/dashboard-setup"
 chmod 755 "$STAGE/etc/init.d/airsim" "$STAGE/usr/libexec/rpcd/airsim" "$STAGE/usr/lib/airsim/prepare" "$STAGE/usr/lib/airsim/bin/"* "$STAGE/usr/lib/airsim/airsim-"*
-chmod 755 "$STAGE/etc/init.d/airsim-update"
+chmod 755 "$STAGE/etc/init.d/airsim-update" "$STAGE/etc/init.d/airsim-device-settings"
 KEY=${AIRSIM_PACKAGE_KEY:-$HERE/out/signing/airsim-dev.pem}
 mkdir -p "$(dirname "$KEY")"
 if [ ! -s "$KEY" ]; then
 	(umask 077; openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$KEY" 2>/dev/null)
 fi
-openssl pkey -in "$KEY" -pubout -out "$HERE/dist/airsim-dev.pem" 2>/dev/null
+openssl pkey -in "$KEY" -pubout -out "$PACKAGE_DIR/airsim-dev.pem" 2>/dev/null
 # ADB v3 compatible with device apk-tools 3.0.5. Retain parent directory
 # records as well: apk-tools 3.0.8 extract validates parents within the archive
 # rather than trusting pre-existing directories in the destination.
@@ -85,6 +92,6 @@ docker run --rm -v "$HERE:/work" -v "$KEY:/signing/key.pem:ro" node:22-alpine ap
  --script "post-upgrade:$POST_INSTALL" \
  --script "pre-upgrade:$PRE_UPGRADE" \
  --script pre-deinstall:/work/packaging/openwrt/pre-deinstall \
- --files "/work/out/${STAGE##*/}" --output "/work/dist/luci-app-airsim-$VERSION.apk"
-(cd "$HERE/dist"; shasum -a 256 "luci-app-airsim-$VERSION.apk" airsim-dev.pem > SHA256SUMS)
-printf 'Package: %s\n' "$HERE/dist/luci-app-airsim-$VERSION.apk"
+ --files "/work/out/${STAGE##*/}" --output "/work/$PACKAGE_OUT/luci-app-airsim-$VERSION.apk"
+(cd "$PACKAGE_DIR"; shasum -a 256 "luci-app-airsim-$VERSION.apk" airsim-dev.pem > SHA256SUMS)
+printf 'Package: %s\n' "$PACKAGE_DIR/luci-app-airsim-$VERSION.apk"
