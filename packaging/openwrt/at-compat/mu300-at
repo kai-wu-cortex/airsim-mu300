@@ -1,0 +1,164 @@
+#!/bin/sh
+# mu300-at compatibility wrapper (opt-in).
+#
+# The mu300-at shipped on the device image only understands
+#     mu300-at [-t SECONDS] "AT+COMMAND"
+# Two things on top of that break AirSIM releases >= r24 on a 5G SA / dual-SIM setup:
+#
+#   1) Stdin mode.  The agent calls `mu300-at -` and writes commands to stdin.  The
+#      stock script treats "-" as a command, sends it to the modem and gets
+#      "+CME ERROR: 0", so every CLCC poll fails, the agent reports
+#      calls.available=false and the phone refuses to dial.  This wrapper reads
+#      stdin and issues one AT command per line instead.
+#
+#   2) AT+CSQ on 5G SA.  The modem answers "99,99" (unknown) even with a healthy
+#      signal; the real level only exists in the trailing SS-RSRP / RSRP fields of
+#      AT+CESQ.  This wrapper maps CESQ back to the 0..31 CSQ scale
+#      (0 = -113 dBm, step 2 dB) so existing parsers keep working.
+#
+# It also has an optional third behaviour, disabled unless you create
+# /etc/airsim/voice-card with "0" or "1": pin voice AT commands to one SIM slot.
+# Reason: with /run/mu300-radio-freeze present and /run/mu300/sim-slot=1 the
+# stock script silently reroutes *any* call that does not set MU300_AT_DIR to the
+# second slot.  On a device where only slot 0 is provisioned for voice (VoLTE),
+# dialing then goes to a data-only SIM and never connects.  With the file absent
+# nothing is pinned and behaviour is exactly the stock one.
+#
+# Install: see README.md in this directory.  Not installed by the APK: it is
+# placed next to the stock script only when an admin explicitly opts in.
+#
+# Environment:
+#   MU300_AT_REAL        path of the stock script (default: mu300-at.vendor here)
+#   MU300_VOICE_CARD     0|1, overrides /etc/airsim/voice-card
+#   MU300_AT_SLOT_DIR_0  command fifo dir of slot 0 (default /run/mu300-at)
+#   MU300_AT_SLOT_DIR_1  command fifo dir of slot 1 (default /run/mu300-at4)
+set -u
+
+self=$0
+case $self in
+	*/*) here=${self%/*} ;;
+	*) here=. ;;
+esac
+
+REAL=${MU300_AT_REAL:-}
+if [ -z "$REAL" ]; then
+	for c in "$here/mu300-at.vendor" "$here/mu300-at.real"; do
+		[ -x "$c" ] && { REAL=$c; break; }
+	done
+fi
+if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
+	echo "mu300-at: stock script not found (set MU300_AT_REAL, or keep it as mu300-at.vendor next to this wrapper)" >&2
+	exit 1
+fi
+# Refuse to call ourselves: a self-loop here forks until the box dies.
+if [ "$(readlink -f "$REAL" 2>/dev/null || echo "$REAL")" = "$(readlink -f "$self" 2>/dev/null || echo "$self")" ]; then
+	echo "mu300-at: MU300_AT_REAL points back at this wrapper" >&2
+	exit 1
+fi
+
+SLOT_DIR_0=${MU300_AT_SLOT_DIR_0:-/run/mu300-at}
+SLOT_DIR_1=${MU300_AT_SLOT_DIR_1:-/run/mu300-at4}
+
+timeout=
+if [ "${1:-}" = -t ]; then
+	[ "$#" -ge 2 ] || { echo "mu300-at: missing timeout" >&2; exit 2; }
+	timeout=$2
+	shift 2
+fi
+cmd=${1:-}
+
+# Voice slot policy: empty file/var means "do not pin", which is the default.
+voice_card=${MU300_VOICE_CARD:-}
+if [ -z "$voice_card" ] && [ -f /etc/airsim/voice-card ]; then
+	voice_card=$(cat /etc/airsim/voice-card 2>/dev/null)
+fi
+case $voice_card in
+	0) voice_dir=$SLOT_DIR_0 ;;
+	1) voice_dir=$SLOT_DIR_1 ;;
+	*) voice_dir= ;;
+esac
+
+is_voice() {
+	case $1 in
+	ATD*|atd*|Atd*|ATA|ata|Ata|ATH|ath|Ath|\
+	AT+CHUP*|at+chup*|AT+VTS*|at+vts*|AT+CLCC*|at+clcc*|AT+CLIP*|at+clip*|\
+	AT+CMUT*|at+cmut*|AT+CHLD*|at+chld*|AT+CTFR*|at+ctfr*)
+		return 0 ;;
+	esac
+	return 1
+}
+
+# run CMD [ARGS...] through the stock script, with the timeout it was given and,
+# for voice commands only, a pinned command-fifo directory.
+run() {
+	if [ -n "$voice_dir" ] && is_voice "$1"; then
+		if [ -n "$timeout" ]; then
+			MU300_AT_DIR=$voice_dir "$REAL" -t "$timeout" "$@"
+		else
+			MU300_AT_DIR=$voice_dir "$REAL" "$@"
+		fi
+	elif [ -n "$timeout" ]; then
+		"$REAL" -t "$timeout" "$@"
+	else
+		"$REAL" "$@"
+	fi
+}
+
+# AT+CSQ -> ask CESQ, fold SS-RSRP (5G) or RSRP (LTE) back onto the CSQ scale.
+csq() {
+	out=$(run 'AT+CESQ' 2>&1)
+	level=$(printf '%s\n' "$out" | awk -F'[:,]' '
+		/^\+CESQ:/ {
+			ss = $9 + 0; lte = $7 + 0;
+			if (ss > 0 && ss <= 127) rsrp = ss - 156;
+			else if (lte > 0 && lte <= 127) rsrp = lte - 140;
+			else exit;
+			i = int((rsrp + 113) / 2);
+			if (i < 0) i = 0;
+			if (i > 31) i = 31;
+			print i;
+			exit;
+		}')
+	if [ -n "$level" ]; then
+		printf '+CSQ: %s,99\nOK\n' "$level"
+		return 0
+	fi
+	# No usable CESQ (2G/3G, or a modem that rejects CESQ): keep the stock answer.
+	run 'AT+CSQ'
+}
+
+# stdin mode: one command per line, replies printed in order, first failure wins.
+stdin_mode() {
+	rc=0
+	exec 3<&0
+	# `|| [ -n "$line" ]`: a client may write its last command without a newline.
+	while IFS= read -r line <&3 || [ -n "$line" ]; do
+		line=$(printf '%s' "$line" | tr -d '\r')
+		[ -n "$line" ] || continue
+		case $line in
+			AT+CSQ|at+csq|At+Csq)
+				csq || rc=$?
+				;;
+			*)
+				run "$line" || rc=$?
+				;;
+		esac
+	done
+	exec 3<&-
+	return $rc
+}
+
+case $cmd in
+	''|'-')
+		[ "$cmd" = - ] || { echo 'usage: mu300-at [-t SECONDS] "AT+COMMAND" | mu300-at [-t SECONDS] -' >&2; exit 2; }
+		stdin_mode
+		exit $?
+		;;
+	AT+CSQ|at+csq|At+Csq)
+		csq
+		exit $?
+		;;
+esac
+
+run "$@"
+exit $?
