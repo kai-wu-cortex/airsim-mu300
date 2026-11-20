@@ -51,7 +51,7 @@ func New(path, id string) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	if json.Unmarshal(b, &g.keys) != nil || len(g.keys) > 16 {
+	if json.Unmarshal(b, &g.keys) != nil {
 		return nil, errors.New("invalid gateway state")
 	}
 	for _, key := range g.keys {
@@ -70,26 +70,16 @@ func decode(s string) ([]byte, error) {
 }
 
 // CheckAdd checks a candidate without authorizing it. Pairing uses this before
-// Agent registration; a rejected registration must not consume a client slot.
-// Add checks again when committing, since capacity may have changed meanwhile.
+// Agent registration; a rejected registration must not authorize a local key.
+// Pairings have no fixed count limit. Add still validates before durable storage.
 func (g *Gateway) CheckAdd(encoded string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.checkAddLocked(encoded)
 }
 func (g *Gateway) checkAddLocked(encoded string) error {
-	if _, err := decode(encoded); err != nil {
-		return err
-	}
-	for _, key := range g.keys {
-		if key == encoded {
-			return nil
-		}
-	}
-	if len(g.keys) >= 16 {
-		return errors.New("gateway client limit reached")
-	}
-	return nil
+	_, err := decode(encoded)
+	return err
 }
 func (g *Gateway) Add(encoded string) error {
 	g.mu.Lock()

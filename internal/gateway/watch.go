@@ -106,16 +106,19 @@ func (g *Gateway) watchParentsLocked() []string {
 		return nil
 	}
 	var disk []string
-	if json.Unmarshal(raw, &disk) != nil || len(disk) > 16 {
+	if json.Unmarshal(raw, &disk) != nil {
 		return nil
+	}
+	// Retain the intersection with in-memory keys without a quadratic scan as
+	// the saved pairing list grows. Disk-only additions never grant authority.
+	present := make(map[string]struct{}, len(disk))
+	for _, k := range disk {
+		present[k] = struct{}{}
 	}
 	var matched []string
 	for _, k := range g.keys {
-		for _, v := range disk {
-			if k == v {
-				matched = append(matched, k)
-				break
-			}
+		if _, ok := present[k]; ok {
+			matched = append(matched, k)
 		}
 	}
 	return matched

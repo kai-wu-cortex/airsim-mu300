@@ -10,9 +10,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -215,31 +217,112 @@ func TestWrongPairingCodeNeverReachesRegistration(t *testing.T) {
 	}
 }
 
-func TestPairingInvalidOrFullGatewayDoesNotReplaceAgentRegistration(t *testing.T) {
-	for _, full := range []bool{false, true} {
-		d := pairingFixture(t, func(*http.Request) (*http.Response, error) {
-			t.Fatal("invalid or over-capacity gateway key reached Agent")
-			return nil, nil
-		})
-		reg := pairingRegistrationFixture(99)
-		if full {
+func TestPairingInvalidGatewayDoesNotReplaceAgentRegistration(t *testing.T) {
+	d := pairingFixture(t, func(*http.Request) (*http.Response, error) {
+		t.Fatal("invalid gateway key reached Agent")
+		return nil, nil
+	})
+	reg := pairingRegistrationFixture(99)
+	reg["vowlan_secret"] = "invalid-key"
+	s, err := pairing.New(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.session = s
+	w := httptest.NewRecorder()
+	d.claim(w, httptest.NewRequest("POST", "/pair/v1/claim", bytes.NewReader(encryptedPairingClaim(t, s, s.Code, reg))))
+	if w.Code != http.StatusBadRequest || d.paired || d.activeSession() != nil {
+		t.Fatal("gateway failure accepted")
+	}
+}
+
+func TestSeventeenthLocalPairingAndStorageFailure(t *testing.T) {
+	for _, failStorage := range []bool{false, true} {
+		t.Run(fmt.Sprint(failStorage), func(t *testing.T) {
+			d := pairingFixture(t, func(*http.Request) (*http.Response, error) {
+				t.Fatal("local pairing contacted cloud registration")
+				return nil, nil
+			})
+			path := filepath.Join(t.TempDir(), "keys.json")
+			var err error
+			d.gateway, err = gateway.New(path, d.deviceID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for i := byte(0); i < 16; i++ {
 				if err := d.gateway.Add(pairingRegistrationFixture(i)["vowlan_secret"].(string)); err != nil {
 					t.Fatal(err)
 				}
 			}
-		} else {
-			reg["vowlan_secret"] = "invalid-key"
-		}
-		s, err := pairing.New(time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.session = s
-		w := httptest.NewRecorder()
-		d.claim(w, httptest.NewRequest("POST", "/pair/v1/claim", bytes.NewReader(encryptedPairingClaim(t, s, s.Code, reg))))
-		if w.Code != http.StatusInternalServerError || d.paired {
-			t.Fatal("gateway failure accepted")
-		}
+			before := d.gateway.Clients()
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failStorage {
+				if err := os.Mkdir(path+".tmp", 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s, err := pairing.New(time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.session = s
+			reg := pairingRegistrationFixture(99)
+			reg["local_mode"] = true
+			body := encryptedPairingClaim(t, s, s.Code, reg)
+			w := httptest.NewRecorder()
+			d.claim(w, httptest.NewRequest("POST", "/pair/v1/claim", bytes.NewReader(body)))
+			if failStorage {
+				var reply map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
+					t.Fatal(err)
+				}
+				if w.Code != 500 || reply["error"] != "gateway_key_storage_failed" || reply["retry_with_new_code"] != true || reply["message"] == "" || d.paired {
+					t.Fatal("storage failure misrepresented")
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(original, after) || len(d.gateway.Clients()) != 16 {
+					t.Fatal("failed save mutated pairings")
+				}
+			} else if w.Code != 200 || !d.paired || !strings.Contains(w.Body.String(), `"configured":true`) {
+				t.Fatal("17th pairing rejected", w.Code, w.Body.String())
+			}
+			w = httptest.NewRecorder()
+			d.claim(w, httptest.NewRequest("POST", "/pair/v1/claim", bytes.NewReader(body)))
+			if w.Code != http.StatusGone {
+				t.Fatal("spent code replay was not closed")
+			}
+			w = httptest.NewRecorder()
+			d.pairInfo(w, httptest.NewRequest("GET", "/pair/v1/info", nil))
+			if w.Code != http.StatusGone || d.activeSession() != nil {
+				t.Fatal("spent code still advertised")
+			}
+			if failStorage {
+				if err := os.Remove(path + ".tmp"); err != nil {
+					t.Fatal(err)
+				}
+				s, err = pairing.New(time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				d.session = s
+				w = httptest.NewRecorder()
+				d.claim(w, httptest.NewRequest("POST", "/pair/v1/claim", bytes.NewReader(encryptedPairingClaim(t, s, s.Code, reg))))
+				if w.Code != 200 {
+					t.Fatal("fresh code cannot recover after storage repair")
+				}
+			}
+			restored, err := gateway.New(path, d.deviceID)
+			if err != nil || len(restored.Clients()) != 17 {
+				t.Fatal("17th pairing not durable", err)
+			}
+			for i, c := range before {
+				if restored.Clients()[i].ID != c.ID {
+					t.Fatal("existing pairing changed")
+				}
+			}
+		})
 	}
 }

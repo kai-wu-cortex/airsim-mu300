@@ -114,20 +114,55 @@ func TestHealthIdentityPersistsAndRejectsReplay(t *testing.T) {
 		t.Fatal("secret file permissions")
 	}
 }
-func TestSecretValidationAndBoundedClients(t *testing.T) {
+func TestSecretValidationAndUnlimitedSavedClients(t *testing.T) {
 	g, _ := New(filepath.Join(t.TempDir(), "clients.json"), "test")
 	for _, key := range []string{"", "bad!", base64.RawURLEncoding.EncodeToString([]byte("short"))} {
 		if g.Add(key) == nil {
 			t.Fatal("invalid key accepted")
 		}
 	}
-	for i := 0; i < 16; i++ {
+	for i := 0; i < 64; i++ {
 		key := sha256.Sum256([]byte(fmt.Sprint(i)))
 		if err := g.Add(base64.RawURLEncoding.EncodeToString(key[:])); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if g.Add(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("z", 32)))) == nil {
-		t.Fatal("unbounded clients")
+	reloaded, err := New(g.path, "test")
+	if err != nil || len(reloaded.Clients()) != 64 {
+		t.Fatal("saved pairings above the old limit did not reload", err)
+	}
+	for i := 0; i < 64; i++ {
+		key := sha256.Sum256([]byte(fmt.Sprint(i)))
+		if err := reloaded.Add(base64.RawURLEncoding.EncodeToString(key[:])); err != nil {
+			t.Fatal(err)
+		}
+		ts, nonce := fmt.Sprint(time.Now().Unix()), fmt.Sprintf("saved-client-%d", i)
+		if reloaded.authenticate("GET", "/v1/health", nil, ts, nonce, Sign(key[:], canonical("GET", "/v1/health", nil, ts, nonce))) == nil {
+			t.Fatalf("saved client %d cannot authenticate", i)
+		}
+	}
+	if len(reloaded.Clients()) != 64 {
+		t.Fatal("duplicate keys appended")
+	}
+	original := reloaded.Clients()
+	if err := reloaded.RemoveClientIdle(original[16].ID); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err = New(g.path, "test")
+	if err != nil || len(reloaded.Clients()) != 63 {
+		t.Fatal("single removal did not persist", err)
+	}
+	for _, c := range reloaded.Clients() {
+		if c.ID == original[16].ID {
+			t.Fatal("removed pairing survived")
+		}
+	}
+	keys := append(append([]string(nil), reloaded.keys...), "invalid-key")
+	raw, _ := json.Marshal(keys)
+	if err := os.WriteFile(g.path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(g.path, "test"); err == nil {
+		t.Fatal("invalid durable key accepted")
 	}
 }

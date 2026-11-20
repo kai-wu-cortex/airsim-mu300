@@ -514,14 +514,22 @@ func (d *daemon) claim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clear(plaintext)
+	// Open consumes an authenticated claim once, including when registration or
+	// persistence later fails. Close that window on every exit so a spent code is
+	// not advertised as reusable. Never reopen it or replay a registration.
+	defer d.closePair(s.ID)
 	var reg map[string]any
 	if json.Unmarshal(plaintext, &reg) != nil {
 		write(w, 400, map[string]string{"error": "invalid_registration"})
 		return
 	}
 	localSecret, _ := reg["vowlan_secret"].(string)
-	if d.gateway == nil || d.gateway.CheckAdd(localSecret) != nil {
-		write(w, 500, map[string]string{"error": "gateway_key_storage_failed"})
+	if d.gateway == nil {
+		pairStorageFailure(w)
+		return
+	}
+	if d.gateway.CheckAdd(localSecret) != nil {
+		write(w, 400, map[string]string{"error": "invalid_registration", "message": "Invalid gateway key; request a new pairing code after correcting the registration."})
 		return
 	}
 	result := map[string]any{"configured": true, "local_mode": true}
@@ -561,7 +569,7 @@ func (d *daemon) claim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if d.gateway.Add(localSecret) != nil {
-		write(w, 500, map[string]string{"error": "gateway_key_storage_failed"})
+		pairStorageFailure(w)
 		return
 	}
 	// Agent HTTP 200 acknowledges validation and persistence. Its configured
@@ -584,6 +592,14 @@ func (d *daemon) claim(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 	d.closePair(s.ID)
 	write(w, 200, result)
+}
+
+func pairStorageFailure(w http.ResponseWriter) {
+	write(w, 500, map[string]any{
+		"error":               "gateway_key_storage_failed",
+		"message":             "Device could not save the pairing. Check writable storage and free space, then request a new pairing code; do not retry the old code.",
+		"retry_with_new_code": true,
+	})
 }
 
 // These fields belong to the phone-side gateway, not the Go Agent's strict

@@ -43,3 +43,15 @@ test('list and revoke have separate RPC permissions',()=>{
  const acl=JSON.parse(readFileSync(new URL('../packaging/openwrt/root/usr/share/rpcd/acl.d/luci-app-airsim.json',import.meta.url),'utf8'))['luci-app-airsim'];
  assert.ok(acl.read.ubus.airsim.includes('pair_clients'));assert.ok(!acl.read.ubus.airsim.includes('pair_remove'));assert.ok(acl.write.ubus.airsim.includes('pair_remove'));
 });
+test('more than sixteen pairings remain visible and only confirmed selection is removed',async()=>{
+ const clients=Array.from({length:40},(_,i)=>({id:i.toString(16).padStart(64,'0')}));
+ const t=setup({ok:true,clients});
+ assert.equal(t.removeButtons().length,40);
+ assert.match(t.root.textContent,/不设固定名额上限/);
+ t.removeButtons()[16].attrs.click();
+ assert.equal(t.requests.length,0);
+ t.setState({ok:true,clients:clients.filter((_,i)=>i!==16)});
+ await t.button('确认移除').attrs.click();
+ assert.deepEqual(t.requests.filter(x=>x.method==='pair_remove'),[{method:'pair_remove',args:[clients[16].id]}]);
+ assert.equal(t.removeButtons().length,39);
+});

@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -127,6 +128,41 @@ func watchPreface(key []byte, grant, nonce string) string {
 	ts := fmt.Sprint(time.Now().Unix())
 	media := deriveWatch(key, "watch-media-v2\n"+grant)
 	return fmt.Sprintf("AIRSIMWATCH2 %s %s %s %s\n", grant, ts, nonce, Sign(media, "watch-pcm-v2\n"+grant+"\n"+ts+"\n"+nonce))
+}
+
+func TestWatchParentsAboveSixteenSurviveReloadAndStillRevoke(t *testing.T) {
+	g, b, parent, key, id := watchSetup(t)
+	for i := 0; i < 63; i++ {
+		k := sha256.Sum256([]byte(fmt.Sprintf("many-clients-%d", i)))
+		if err := g.Add(base64.RawURLEncoding.EncodeToString(k[:])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g, err := New(g.path, g.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.SetWatchBackend(b)
+	if watchRequest(g, key, id, "/api/watch/status", "many-watch-clients").Code != 200 {
+		t.Fatal("Watch authorization failed with more than 16 saved parents")
+	}
+	// Editing durable state can revoke an existing parent, but cannot authorize
+	// a new one in the live process, regardless of the size of the file.
+	outsider := []byte(strings.Repeat("z", 32))
+	disk := append(append([]string(nil), g.keys[1:]...), base64.RawURLEncoding.EncodeToString(outsider))
+	raw, _ := json.Marshal(disk)
+	if err := os.WriteFile(g.path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if watchRequest(g, key, id, "/api/watch/status", "many-watch-revoked").Code != 401 {
+		t.Fatal("removed durable parent remained authorized")
+	}
+	if watchRequest(g, deriveWatch(outsider, "AirSIM/watch-call-only/v2"), id, "/api/watch/status", "many-watch-outsider").Code != 401 {
+		t.Fatal("disk-only addition authorized")
+	}
+	if g.hasClientLocked(watchOwner(parent)) != true {
+		t.Fatal("fixture parent not in memory")
+	}
 }
 func TestWatchPCMGrantDuplexAndRevocation(t *testing.T) {
 	for _, end := range []string{"ended", "unpair", "reset-file", "identity", "hard-limit"} {

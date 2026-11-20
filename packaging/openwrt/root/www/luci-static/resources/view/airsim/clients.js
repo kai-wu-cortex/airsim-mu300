@@ -58,6 +58,7 @@ return view.extend({
    E('link',{rel:'stylesheet',href:L.resource('view/airsim/overview.css')}),
    E('header',{'class':'as-header'},[E('div',{},[E('h2',{},'配对设备'),count]),E('button',{type:'button','class':'as-button as-secondary',click:refresh},'刷新列表')]),
    E('p',{'class':'as-copy'},'每条记录对应一份配对密钥，同一手机重复配对可能有多条记录。指纹不是密钥，也不是设备名称。'),
+   E('p',{'class':'as-copy'},'配对记录不设固定名额上限，不会自动清理旧配对。可按指纹与最近活动确认后，单独移除不再使用的记录。'),
    E('p',{'class':'as-caption'},'最近活动仅统计本次服务启动后的局域网、Tailscale 和关联 Watch 认证。纯云端活动不计入；重启服务后重新统计。移除不重启服务、不删除短信或云端账户配置。'),
    feedback,confirmation,rows
   ]),'overview');
