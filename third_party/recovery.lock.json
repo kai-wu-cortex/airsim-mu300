@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "out/release-sources/alsa-lib-1.2.11.tar.bz2",
+      "sha256": "9f3f2f69b995f9ad37359072fbc69a3a88bfba081fc83e9be30e14662795bb4d"
+    },
+    {
+      "path": "out/release-sources/alsa-utils-1.2.11.tar.bz2",
+      "sha256": "9ac6ca3a883f151e568dcf979b8d2e5cbecc51b819bb0e6bb8a2e9b34cc428a7"
+    },
+    {
+      "path": "out/release-sources/mu300-audio-v1.0.5-source.tar.gz",
+      "sha256": "e281c14721e2f6c6281af86f7fd47bb84591bb1144b8a3352a31696f1050da0d"
+    },
+    {
+      "path": "out/release-sources/openwrt-packages-source.tar.gz",
+      "sha256": "c4baab767c5b7f345327e664975eb7e215b94b4eb572960468590eb688aa1476"
+    },
+    {
+      "path": "out/release-sources/mu300-linux-kernel-build-source.tar.gz",
+      "sha256": "3bcc1c21005249ea7e7137a16ef068c7f8b15e63834ddef4778e24561018ebf4"
+    },
+    {
+      "path": "out/release-sources/recovered-audio-r16-source.tar.gz",
+      "sha256": "81bb1902e255f2e1f710fff9f0f84e2011f667ba90a50f616368a35d57646b64"
+    },
+    {
+      "path": "out/alsa-packages/alsa-lib-1.2.11-r1.apk",
+      "sha256": "8a64a215c6592301bd358243801fdc4526a616ab1fec88709fbdb681e6d159c8"
+    },
+    {
+      "path": "out/alsa-packages/alsa-utils-1.2.11-r1.apk",
+      "sha256": "3c84a77d6edc3821b0737571a6b33f7693ba1881f35ac6e9619d053c150a3878"
+    },
+    {
+      "path": "out/audio-deps/mu300-audio-5.4.tar.gz",
+      "sha256": "8e2eb2774c485a2df4e28e4e77592a457ffbb626f1dace3b6d1cdc338b786e2b"
+    },
+    {
+      "path": "out/audio-deps/SHA256SUMS",
+      "sha256": "42f991d76e0246a1385fbe46e75102dcd46db138dbfd816e853f4f245b02cf91"
+    },
+    {
+      "path": "out/audio-deps/airsim-audio-0.1.0-r16.tar.gz",
+      "sha256": "5af9b2dd888905b453b61273668736c24e1dd67b821d5fdb5a59c807a0134af3"
+    },
+    {
+      "path": "out/firmware-backup/agdsp.bin",
+      "sha256": "378ceea78dbf013e10625e71efd6fab487d727e371884ae8daf078da2828b937"
+    },
+    {
+      "path": "out/kernel73/mu300-update.legacy",
+      "sha256": "d2b4594130654047d9b91cedb22e8b18b888515192073ff8a94d0cc688b74a23"
+    },
+    {
+      "path": "out/kernel73/mu300-update.original",
+      "sha256": "cda543e8c077e92fffbea947a4662f571a5718ae9b82fba6491801674a6df12e"
+    },
+    {
+      "path": "out/openwrt-audio/downloads/zte-b50db5b-preserved.tar.gz",
+      "sha256": "e9ee612dc2f02e020f84608672d2ba05873b61afbc7374b8337a9ed5e261d349"
+    },
+    {
+      "path": "out/openwrt-audio/downloads/linux.tar.gz",
+      "sha256": "eda640c335faeb79133cad1cb09f35958ca972eb6b9adc82243ec8bebea5cec6"
+    },
+    {
+      "path": "out/openwrt-audio/downloads/modules.tar.gz",
+      "sha256": "01a29c853be8bf202a2f1d3c47cb434c5cabb53ce23137646fd4380242d8e1b2"
+    }
+  ]
+}

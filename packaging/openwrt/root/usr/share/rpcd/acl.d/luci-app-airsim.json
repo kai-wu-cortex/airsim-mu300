@@ -11,7 +11,8 @@
           "diagnostics",
           "updates_status",
           "device_read",
-          "sms_list"
+          "sms_list",
+          "sms_status"
         ]
       }
     },

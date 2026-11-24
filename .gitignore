@@ -11,3 +11,5 @@
 *.pcm
 *.wav
 *.pcap
+__pycache__/
+*.pyc

@@ -16,7 +16,7 @@ if valid "$CACHE/agdsp.bin"; then
 fi
 work=$(mktemp -d "$CACHE/.fetch.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-if [ ! -e "$REPO" ]; then
+if [ ! -e "$REPO" ] && [ "${AIRSIM_OFFLINE:-0}" != 1 ]; then
  # Clone only when missing; never prune a saved mirror or depend on upstream HEAD.
  if git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --mirror "$UPSTREAM" "$work/upstream.git" >&2; then
   mkdir -p "$(dirname "$REPO")"
@@ -26,6 +26,7 @@ fi
 if git -C "$REPO" show "$COMMIT:agdsp.bin" > "$work/agdsp.bin" 2>/dev/null && valid "$work/agdsp.bin"; then
  :
 else
+ [ "${AIRSIM_OFFLINE:-0}" != 1 ] || { echo 'Offline firmware missing; restore dependency vault' >&2; exit 1; }
  curl -fL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 \
   https://github.com/dikeckaan/mu300-audio-firmware/releases/download/v1.0/agdsp.bin -o "$work/agdsp.bin" >&2
  valid "$work/agdsp.bin" || { echo 'Upstream firmware digest mismatch; cache not replaced' >&2; exit 1; }

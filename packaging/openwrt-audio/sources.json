@@ -5,7 +5,9 @@
     "archive_sha256": "857c5fd717a7f93668be7df87243f733c8c5b1edc66eda03672c982a43a81ef1",
     "exclude": [
       "certs/signing_key.pem"
-    ]
+    ],
+    "preserved_archive_sha256": "e9ee612dc2f02e020f84608672d2ba05873b61afbc7374b8337a9ed5e261d349",
+    "preserved_archive_note": "Same pinned source with certs/signing_key.pem removed; other tar members preserved."
   },
   "system_recipe": {
     "url": "https://api.github.com/repos/dikeckaan/mu300-linux/tarball/v2026.10.30.1",

@@ -52,7 +52,7 @@ test('nine pages expose matching navigation and load through existing read-only 
   assert.equal(root.attrs['data-page'],route);
   const nav=h.walk(root).filter(n=>n.tag==='a'&&n.className.includes('as-menu-item'));
   assert.equal(nav.length,9);assert.equal(nav.filter(n=>n.attrs['aria-current']==='page').length,1);
-  assert.ok(h.requests.every(r=>['device_read','status','settings_get','updates_status','kernel_status','sms_list','sms_job'].includes(r.method)),route);
+  assert.ok(h.requests.every(r=>['device_read','status','settings_get','updates_status','kernel_status','sms_list','sms_job','sms_status'].includes(r.method)),route);
   if(route==='net'){assert.deepEqual(h.walk(root).filter(n=>n.tag==='h3').map(n=>n.textContent),['上网方式','连接 Wi-Fi','已保存的 Wi-Fi','管理页面访问','这台机器的限制']);assert.ok(h.requests.filter(r=>r.method==='device_read').every(r=>['network','maintenance_job'].includes(JSON.parse(r.args[0]).action)));}
  }
 });

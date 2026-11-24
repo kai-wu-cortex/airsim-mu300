@@ -9,10 +9,17 @@ O=/build/out-linux
 expected=1057cb97e0d2d7f26816e8bf7841faac1153833a01d4893cdc196b75ae6356b3
 config_sum() { grep -E '^(CONFIG_|# CONFIG_)' "$1" | LC_ALL=C sort | sha256sum | cut -d' ' -f1; }
 case "$stage" in prepare|compile) ;; *) exit 2 ;; esac
-test "$(sha256sum /inputs/zte-b50db5b.tar.gz | cut -d' ' -f1)" = 857c5fd717a7f93668be7df87243f733c8c5b1edc66eda03672c982a43a81ef1
+# Offline source excludes only the upstream signing private key.
+if [ -f /inputs/zte-b50db5b-preserved.tar.gz ]; then
+    kernel_archive=/inputs/zte-b50db5b-preserved.tar.gz
+    test "$(sha256sum "$kernel_archive" | cut -d' ' -f1)" = e9ee612dc2f02e020f84608672d2ba05873b61afbc7374b8337a9ed5e261d349
+else
+    kernel_archive=/inputs/zte-b50db5b.tar.gz
+    test "$(sha256sum "$kernel_archive" | cut -d' ' -f1)" = 857c5fd717a7f93668be7df87243f733c8c5b1edc66eda03672c982a43a81ef1
+fi
 if [ ! -d "$S" ]; then
     mkdir -p "$S"
-    tar -xzf /inputs/zte-b50db5b.tar.gz --strip-components=1 \
+    tar -xzf "$kernel_archive" --strip-components=1 \
         --exclude='*/certs/signing_key.pem' -C "$S"
     # The release's build-all.sh patch order; source stays isolated from Android work.
     for p in bluetooth-marlin3-link-policy of-reserved-mem-skip regdb-wens-certificate \

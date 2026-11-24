@@ -6,6 +6,7 @@ fetch() {
 	name=$1 expected=$2
 	file="$HERE/out/alsa-packages/$name"
 	if [ ! -f "$file" ]; then
+		[ "${AIRSIM_OFFLINE:-0}" != 1 ] || { echo "Offline dependency missing: $name; restore dependency vault" >&2; exit 1; }
 		curl -fL --proto '=https' --connect-timeout 15 --max-time 180 --retry 3 \
 			"https://downloads.openwrt.org/releases/25.12.6/packages/aarch64_generic/packages/$name" -o "$file"
 	fi
@@ -21,6 +22,7 @@ for name in mu300-audio-5.4.tar.gz SHA256SUMS; do
 		if [ -f "$HERE/backups/mu300-audio-2026-10-26/release-assets/v1.0.5/$name" ]; then
 			cp "$HERE/backups/mu300-audio-2026-10-26/release-assets/v1.0.5/$name" "$file"
 		else
+			[ "${AIRSIM_OFFLINE:-0}" != 1 ] || { echo "Offline audio missing: $name; restore dependency vault" >&2; exit 1; }
 			# Original upstream may be unavailable. Both copies must match the
 			# independently pinned bytes below; the mirror is not a new version.
 			mirror=$name
@@ -43,6 +45,7 @@ done
 if [ "${AIRSIM_COMPLETE_INSTALL:-1}" = 1 ] && [ -z "${AIRSIM_AUDIO_BUNDLE:-}" ]; then
  file="$HERE/out/audio-deps/airsim-audio-0.1.0-r16.tar.gz"
  if [ ! -f "$file" ]; then
+  [ "${AIRSIM_OFFLINE:-0}" != 1 ] || { echo 'Offline recovery bundle missing; restore dependency vault' >&2; exit 1; }
   curl -fL --proto '=https' --connect-timeout 15 --max-time 180 --retry 3 \
    https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r16/airsim-audio-0.1.0-r16.tar.gz -o "$file.part"
   mv "$file.part" "$file"

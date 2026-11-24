@@ -7,12 +7,15 @@
 var listSMS = rpc.declare({ object: 'airsim', method: 'sms_list', params: ['page'], expect: {}, reject: true, nobatch: true });
 var showSMS = rpc.declare({ object: 'mu300dash', method: 'sms_show', params: ['id'], expect: {}, reject: true, nobatch: true });
 var sendSMS = rpc.declare({ object: 'airsim', method: 'sms_send', params: ['num', 'text'], expect: {}, reject: true, nobatch: true });
+var getPhoneSMSStatus = rpc.declare({ object: 'airsim', method: 'sms_status', expect: {}, reject: true, nobatch: true });
 var getJob = rpc.declare({ object: 'mu300dash', method: 'sms_job', expect: {}, reject: true, nobatch: true });
 
 return baseclass.extend({
  render: function(split) {
   var page = 1, pages = 1, loading = false, reading = false, checking = false;
   var sending = false, running = false, jobKnown = false, watching = false, uncertain = false;
+  var lastPhoneStatus = 0, checkingPhone = false;
+  var phoneStatus = E('p', { 'class': 'as-caption', role: 'status' }, '正在检查 AirSIM 手机短信链路…');
   var lastList = 0, signature = '', draft = null, selected = '';
   var list = E('div', { 'class': 'as-sms-list', 'aria-label': '短信列表' });
   var count = E('span', { 'class': 'as-pill as-pill-neutral' }, '读取中');
@@ -35,6 +38,23 @@ return baseclass.extend({
    counter.textContent = body.value.length + ' / 70 字';
    previous.disabled = loading || page <= 1; next.disabled = loading || page >= pages;
    refresh.disabled = loading;
+  }
+  async function refreshPhoneStatus() {
+   if (checkingPhone) return;
+   checkingPhone = true;
+   try {
+    var r = await getPhoneSMSStatus();
+    if (!r || !r.available) { phoneStatus.textContent = 'AirSIM 手机短信链路：无法查询，请确认 AirSIM 服务已启动。网页短信与手机同步是不同链路。'; return; }
+    var source = r.source === 'native' ? '原生短信池' : r.source === 'native_json' ? '原生 JSON 收件库（SIM 1）' : r.source === 'compat' ? '兼容快照' : '未报告来源';
+    if (r.state === 'error') phoneStatus.textContent = 'AirSIM 手机短信链路异常（' + source + '）：短信源不可用、过期或格式异常，已有数据保留。网页可读不代表手机同步正常。';
+    else if (r.state === 'waiting') phoneStatus.textContent = 'AirSIM 手机短信链路：等待首次有效读取（' + source + '）。';
+    else if (r.state === 'ready') {
+     var stamp = Number(r.last_success_at);
+     var when = Number.isFinite(stamp) && stamp > 0 ? ' · 最近读取 ' + new Date(stamp * 1000).toLocaleTimeString() : '';
+     phoneStatus.textContent = 'AirSIM 手机短信源可读（' + source + '）' + when + '。手机实际同步与后台推送需在客户端确认。';
+    } else phoneStatus.textContent = 'AirSIM 手机短信链路：状态未知。';
+   } catch (_) { phoneStatus.textContent = 'AirSIM 手机短信链路：状态查询失败，稍后自动重试。'; }
+   finally { checkingPhone = false; lastPhoneStatus = Date.now(); }
   }
   async function refreshList() {
    if (loading) return;
@@ -142,18 +162,18 @@ return baseclass.extend({
   full.appendChild(close);
   var root = E('section', { 'class': 'as-card as-sms', 'aria-label': '短信' }, [
    E('div', { 'class': 'as-card-heading' }, [E('h3', {}, '短信'), count]),
-   E('p', { 'class': 'as-copy' }, '查看与发送 MU300 SIM 卡的短信。'),
+   E('p', { 'class': 'as-copy' }, '查看与发送 MU300 SIM 卡的短信。'), phoneStatus,
    refresh, listHint, list, E('div', { 'class': 'as-buttons as-sms-pages' }, [previous, next]), full,
    E('div', { 'class': 'as-sms-compose' }, [
     E('h4', {}, '新短信'), E('label', { 'for': 'as-sms-number', 'class': 'as-field-label' }, '收件号码'), number,
     E('label', { 'for': 'as-sms-text', 'class': 'as-field-label' }, '短信内容'), body, counter,
-    E('p', { id: 'as-sms-help', 'class': 'as-caption' }, '本页每条最多 70 字，暂不支持 emoji 和长短信拆分。短信只在本设备管理，不转发至 AirSIM 客户端。'),
+    E('p', { id: 'as-sms-help', 'class': 'as-caption' }, '本页每条最多 70 字，暂不支持 emoji 和长短信拆分。手机收件同步由 AirSIM Agent 读取短信源；本页发送成功不代表手机已同步或收件人已收到。'),
     E('div', { 'class': 'as-buttons' }, [send]), confirmation, feedback, ack
    ])
   ]);
-  update(); refreshList(); checkJob();
+  update(); refreshList(); checkJob(); refreshPhoneStatus();
   poll.add(function() {
-   return Promise.all([checkJob(), Date.now() - lastList >= 10000 ? refreshList() : Promise.resolve()]);
+   return Promise.all([checkJob(), Date.now() - lastPhoneStatus >= 10000 ? refreshPhoneStatus() : Promise.resolve(), Date.now() - lastList >= 10000 ? refreshList() : Promise.resolve()]);
   }, 2);
   if(split){var compose=root.querySelector('.as-sms-compose');compose.querySelector('h4').remove();compose.classList.add('as-compose-separated');return {inbox:root,compose:E('section',{'class':'as-card as-sms'},[E('h3',{},'发短信'),compose])};}
   return root;

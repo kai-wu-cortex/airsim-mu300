@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const source=readFileSync(new URL('../packaging/openwrt/root/www/luci-static/resources/view/airsim/sms.js',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
-async function setup() {
+async function setup(phoneReply) {
  const elements=[],requests=[];let poll;
- const replies={sms_list:async()=>({total:1,unread:1,page:1,pages:1,msgs:[{id:'000001',dir:'mt',status:'unread',peer:'fixture',preview:'<script>fixture</script>'}]}),sms_show:async()=>({ok:1,text:'id: 000001\n---\n<script>full fixture</script>'}),sms_job:async()=>({none:1}),sms_send:async()=>({ok:1,started:1})};
+ const replies={sms_status:async()=>phoneReply||({available:true,source:'native',state:'ready',last_success_at:1}),sms_list:async()=>({total:1,unread:1,page:1,pages:1,msgs:[{id:'000001',dir:'mt',status:'unread',peer:'fixture',preview:'<script>fixture</script>'}]}),sms_show:async()=>({ok:1,text:'id: 000001\n---\n<script>full fixture</script>'}),sms_job:async()=>({none:1}),sms_send:async()=>({ok:1,started:1})};
  function E(tag,attrs={},children=[]) {
   const node={tag,attrs,children:[],value:attrs.value??'',disabled:false,hidden:!!attrs.hidden,className:attrs.class??'',focus(){},appendChild(c){this.children.push(c)},replaceChildren(...c){this.children=c}};
   let content='';Object.defineProperty(node,'textContent',{get(){return content||this.children.map(x=>typeof x==='string'?x:x.textContent).join('')},set(v){content=String(v);this.children=[]}});
@@ -21,7 +21,7 @@ async function setup() {
  return {root,elements,requests,replies,number,body,button,poll:()=>poll(),compose(n='15550001111',text='测试 fixture'){number.value=n;body.value=text;body.attrs.input()},sends:()=>requests.filter(r=>r.method==='sms_send')};
 }
 test('only listing and job status load automatically; content remains plain text',async()=>{
- const t=await setup();assert.deepEqual(t.requests.map(r=>r.method),['sms_list','sms_job']);
+ const t=await setup();assert.deepEqual(t.requests.map(r=>r.method),['sms_list','sms_job','sms_status']);
  assert.ok(t.root.textContent.includes('<script>fixture</script>'));
  assert.equal(t.elements.some(e=>e.tag==='script'||'innerHTML' in e),false);
  await t.button('查看全文 · 标记已读').attrs.click();
@@ -64,4 +64,29 @@ test('missing native service fails closed and does not disturb other view module
 test('cancelling confirmation returns unchanged draft without sending',async()=>{
  const t=await setup();t.compose();t.button('发送短信').attrs.click();t.button('返回编辑').attrs.click();
  assert.equal(t.body.value,'测试 fixture');assert.equal(t.number.disabled,false);assert.equal(t.sends().length,0);
+});
+
+// A readable LuCI inbox must not hide a broken phone/Agent inbox.
+test('phone SMS diagnostic distinguishes native, compatibility, waiting and failure',async()=>{
+ for (const [reply,text] of [
+  [{available:true,source:'native',state:'ready'},'手机短信源可读（原生短信池）'],
+  [{available:true,source:'compat',state:'ready'},'手机短信源可读（兼容快照）'],
+  [{available:true,source:'native_json',state:'ready'},'原生 JSON 收件库（SIM 1）'],
+  [{available:true,source:'compat',state:'error'},'手机短信链路异常'],
+  [{available:true,source:'unavailable',state:'waiting'},'等待首次有效读取'],
+  [{available:false},'无法查询']
+ ]) {
+  const t=await setup(reply);
+  assert.ok(t.root.textContent.includes(text));
+  assert.ok(t.root.textContent.includes('<script>fixture</script>'));
+  assert.equal(t.sends().length,0);
+ }
+});
+test('phone status permission is read-only and arbitrary error text is not rendered',async()=>{
+ const acl=JSON.parse(readFileSync(new URL('../packaging/openwrt/root/usr/share/rpcd/acl.d/luci-app-airsim.json',import.meta.url),'utf8'))['luci-app-airsim'];
+ assert.ok(acl.read.ubus.airsim.includes('sms_status'));
+ assert.ok(!acl.write.ubus.airsim.includes('sms_status'));
+ const t=await setup({available:true,source:'<script>private</script>',state:'error',last_poll_error:'secret fixture'});
+ assert.ok(!t.root.textContent.includes('secret fixture'));
+ assert.ok(!t.root.textContent.includes('<script>private</script>'));
 });

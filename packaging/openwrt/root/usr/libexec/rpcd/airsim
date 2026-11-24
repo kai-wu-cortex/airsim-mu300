@@ -20,7 +20,7 @@ service_status() {
 }
 case "$1" in
 list)
-	printf '%s\n' '{"sms_send":{"num":"","text":""},"device_read":{"config":""},"device_write":{"config":""},"sms_list":{"page":""},"pair_clients":{},"pair_remove":{"id":""},"kernel_status":{},"status":{},"settings_get":{},"settings_save":{"config":""},"diagnostics":{},"updates":{"previews":true},"updates_status":{},"updates_policy":{"config":""},"update_install":{"tag":""},"pair_start":{},"pair_cancel":{},"number_refresh":{},"start":{},"stop":{},"call_action":{"action":"","number":"","call_id":"","operation_id":""}}'
+	printf '%s\n' '{"sms_status":{},"sms_send":{"num":"","text":""},"device_read":{"config":""},"device_write":{"config":""},"sms_list":{"page":""},"pair_clients":{},"pair_remove":{"id":""},"kernel_status":{},"status":{},"settings_get":{},"settings_save":{"config":""},"diagnostics":{},"updates":{"previews":true},"updates_status":{},"updates_policy":{"config":""},"update_install":{"tag":""},"pair_start":{},"pair_cancel":{},"number_refresh":{},"start":{},"stop":{},"call_action":{"action":"","number":"","call_id":"","operation_id":""}}'
 	;;
 call)
 	case "$2" in
@@ -30,6 +30,9 @@ call)
 		json_get_var config config
 		case "$2" in device_read) operation=device-read ;; *) operation=device-write ;; esac
 		printf '%s' "$config" | /usr/lib/airsim/airsim-mu300d --manage "$operation"
+		;;
+	sms_status)
+		wget -q -T 5 -O - http://127.0.0.1:7581/sms/status || printf '%s\n' '{"available":false}'
 		;;
 	sms_send)
 		/usr/lib/airsim/airsim-mu300d --manage sms-send

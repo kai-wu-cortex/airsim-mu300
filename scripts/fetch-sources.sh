@@ -7,6 +7,7 @@ mkdir -p "$DEST"
 fetch() {
  name=$1 digest=$2 url=$3
  if [ ! -f "$DEST/$name" ]; then
+  [ "${AIRSIM_OFFLINE:-0}" != 1 ] || { echo "Offline source missing: $name; restore dependency vault" >&2; exit 1; }
   curl -fL --proto '=https' --connect-timeout 15 --max-time 240 --retry 3 "$url" -o "$DEST/$name.part"
   mv "$DEST/$name.part" "$DEST/$name"
  fi

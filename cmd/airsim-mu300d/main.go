@@ -217,6 +217,7 @@ func main() {
 	}()
 	admin := http.NewServeMux()
 	admin.HandleFunc("/status", d.status)
+	admin.HandleFunc("/sms/status", d.smsStatus)
 	// Internal Agent transport only; never registered on the LAN control mux.
 	admin.HandleFunc("/internal/cloud-early-media", d.gateway.ServeCloudEarlyMedia)
 	admin.HandleFunc("/internal/watch/revoke-parent", d.gateway.ServeRevokeParent)

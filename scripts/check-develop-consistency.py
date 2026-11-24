@@ -57,8 +57,9 @@ def check(root=ROOT, binaries=None):
                 continue
             metadata = subprocess.run(['go','version','-m',str(p)],capture_output=True,text=True,check=True).stdout
             # Go -trimpath omits ldflags from build info. The linker stores each
-            # -X string as a NUL-terminated value; require the exact build stamp.
-            if b'\0'+stamp.encode()+b'\0' not in p.read_bytes() or 'GOARCH=arm64' not in metadata or 'GOOS=linux' not in metadata or 'CGO_ENABLED=0' not in metadata:
+            # -X string as a NUL-terminated value. Its preceding byte belongs to
+            # another symbol and need not be NUL; do not reject valid link layouts.
+            if stamp.encode()+b'\0' not in p.read_bytes() or 'GOARCH=arm64' not in metadata or 'GOOS=linux' not in metadata or 'CGO_ENABLED=0' not in metadata:
                 errors.append('binary build/version mismatch: '+name)
     return errors
 

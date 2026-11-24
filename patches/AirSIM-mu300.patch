@@ -1300,7 +1300,7 @@ index b2ff8b6..414c855 100644
  var (
 diff --git a/module/module-agent/mu300.go b/module/module-agent/mu300.go
 new file mode 100644
-index 0000000..45a03e8
+index 0000000..d09522b
 --- /dev/null
 +++ b/module/module-agent/mu300.go
 @@ -0,0 +1,354 @@
@@ -1579,7 +1579,7 @@ index 0000000..45a03e8
 +}
 +
 +func (a *agent) mu300RefreshModem() {
-+	a.mu300RefreshModemWithSignal(mu300VendorSignalDBM)
++	a.mu300RefreshModemWithSignal(func() *int { return mu300VendorSignalDBM(a.mu300MetadataIdle) })
 +}
 +func (a *agent) mu300RefreshModemWithSignal(vendor func() *int) {
 +	if !a.mu300MetadataIdle() {
@@ -2018,10 +2018,10 @@ index 0000000..8d5d6b0
 +}
 diff --git a/module/module-agent/mu300_caller_identity.go b/module/module-agent/mu300_caller_identity.go
 new file mode 100644
-index 0000000..c6f1746
+index 0000000..e37b3c8
 --- /dev/null
 +++ b/module/module-agent/mu300_caller_identity.go
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,162 @@
 +package main
 +
 +import (
@@ -2029,55 +2029,93 @@ index 0000000..c6f1746
 +	"net/url"
 +	"strconv"
 +	"strings"
++	"unicode"
 +)
 +
-+// Only a modem-supplied numeric SIP subscriber is a phone-number projection.
++// Only a modem-supplied numeric SIP/TEL subscriber is a phone-number projection.
 +// This is not generic SIP URI equivalence: a SIP username may look numeric.
 +// Never use it for dial input, SMS destinations, SIM identity or authentication.
 +// Preserve unknown addresses verbatim rather than inventing a telephone number.
 +func mu300CallerNumber(raw string) string {
-+	raw = strings.TrimSpace(raw)
-+	scheme, rest, ok := strings.Cut(raw, ":")
-+	if !ok || (!strings.EqualFold(scheme, "sip") && !strings.EqualFold(scheme, "sips")) {
++	// Reject controls before whitespace trimming, including leading/trailing
++	// CR/LF: they must not turn a malformed address into a usable number.
++	if len(raw) > 512 {
 +		return raw
 +	}
-+	if len(raw) > 512 || strings.ContainsAny(raw, "\r\n\t ") || strings.Count(rest, "@") != 1 {
++	for _, c := range raw {
++		if unicode.IsControl(c) {
++			return raw
++		}
++	}
++	raw = strings.TrimSpace(raw)
++	scheme, rest, hasColon := strings.Cut(raw, ":")
++	tel := strings.EqualFold(scheme, "tel") && hasColon
++	if !hasColon || (!tel && !strings.EqualFold(scheme, "sip") && !strings.EqualFold(scheme, "sips")) {
++		// An old Agent may have omitted the scheme. Only an authority with a
++		// numeric user is eligible; a colon before @ is still an unknown scheme.
++		at := strings.IndexByte(raw, '@')
++		if at < 1 || (hasColon && strings.IndexByte(raw, ':') < at) {
++			return raw
++		}
++		rest = raw
++	}
++	if strings.ContainsAny(raw, "\r\n\t ") {
++		return raw
++	}
++	if (tel && strings.Contains(rest, "@")) || (!tel && strings.Count(rest, "@") != 1) {
 +		return raw
 +	}
 +	subscriber, destination, _ := strings.Cut(rest, "@")
-+	// A password, phone-context, extension or ISDN subaddress can distinguish
-+	// subscribers. Do not discard those components or guess a country prefix.
-+	if strings.ContainsAny(subscriber, ":;?") {
++	// Only explicitly harmless parameters may be omitted, with duplicate
++	// detection shared across the user and authority portions.
++	seen := map[string]bool{}
++	parameters := func(parts []string) bool {
++		for _, part := range parts {
++			key, value, ok := strings.Cut(strings.ToLower(part), "=")
++			if !ok || seen[key] {
++				return false
++			}
++			seen[key] = true
++			switch key {
++			case "user":
++				if value != "phone" {
++					return false
++				}
++			case "transport":
++				if tel || (value != "udp" && value != "tcp" && value != "tls") {
++					return false
++				}
++			default:
++				return false
++			}
++		}
++		return true
++	}
++	userParts := strings.Split(subscriber, ";")
++	if !parameters(userParts[1:]) {
 +		return raw
 +	}
-+	subscriber, err := url.PathUnescape(subscriber)
++	// PathUnescape preserves '+' and decodes exactly once. A password,
++	// context, extension, subaddress or encoded delimiter is not a number.
++	subscriber, err := url.PathUnescape(userParts[0])
 +	if err != nil {
 +		return raw
++	}
++	for i, c := range subscriber {
++		if !(c >= '0' && c <= '9' || c == '-' || c == '.' || c == '(' || c == ')' || c == '+' && i == 0) {
++			return raw
++		}
 +	}
 +	number := mu300NumericCaller(subscriber)
 +	if number == "" {
 +		return raw
 +	}
++	if tel {
++		return number
++	}
 +	parts := strings.Split(destination, ";")
-+	seen := map[string]bool{}
-+	for _, part := range parts[1:] {
-+		key, value, ok := strings.Cut(strings.ToLower(part), "=")
-+		if !ok || seen[key] {
-+			return raw
-+		}
-+		seen[key] = true
-+		switch key {
-+		case "user":
-+			if value != "phone" {
-+				return raw
-+			}
-+		case "transport":
-+			if value != "udp" && value != "tcp" && value != "tls" {
-+				return raw
-+			}
-+		default:
-+			return raw
-+		}
++	if !parameters(parts[1:]) {
++		return raw
 +	}
 +	// Parse the authority without ever resolving or connecting to its host.
 +	u, err := url.Parse("sip://" + parts[0])
@@ -2148,14 +2186,16 @@ index 0000000..c6f1746
 +}
 diff --git a/module/module-agent/mu300_caller_identity_test.go b/module/module-agent/mu300_caller_identity_test.go
 new file mode 100644
-index 0000000..ebd1735
+index 0000000..54c5f9e
 --- /dev/null
 +++ b/module/module-agent/mu300_caller_identity_test.go
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,237 @@
 +package main
 +
 +import (
++	"encoding/json"
 +	"fmt"
++	"os"
 +	"testing"
 +	"time"
 +)
@@ -2272,6 +2312,119 @@ index 0000000..ebd1735
 +	poll("incoming", "sip:12345@[2001:db8::2]")
 +	if a.calls.Active.ID == id || len(a.calls.History) != 1 {
 +		t.Fatal("reused slot kept the connected call identity")
++	}
++}
++
++// Keep this contract aligned with the client presentation parser. These are
++// synthetic identifiers only; no modem, SMS sender or real call is invoked.
++func TestMU300TELAndEscapedCallerProjection(t *testing.T) {
++	for _, tc := range []struct{ raw, want string }{
++		{"tel:+1-202-555-0123", "+12025550123"},
++		{"TEL:%2B1(202)555.0123", "+12025550123"},
++		{"tel:0012025550123", "0012025550123"},
++		{"tel:12345", "12345"},
++		{"tel:12345;user=phone", "12345"},
++		{"sip:12345;user=phone@ims.example", "12345"},
++		{"sip:12345;transport=tcp@ims.example;user=phone", "12345"},
++		{"12345@ims.example", "12345"},
++		{"12345@[2001:db8::1]:5060", "12345"},
++		{"sip:0012025550123@ims.example;user=phone", "0012025550123"},
++		{"sips:%2B12025550123@ims.example;transport=tls;user=phone", "+12025550123"},
++		{"sip:%31%32%33%34%35@ims.example", "12345"},
++	} {
++		if got := mu300CallerNumber(tc.raw); got != tc.want {
++			t.Errorf("%q => %q, want %q", tc.raw, got, tc.want)
++		}
++		if mu300CallerIdentity(tc.raw) != mu300CallerIdentity(tc.want) {
++			t.Errorf("identity mismatch: %q", tc.raw)
++		}
++		if normalizeDialNumber(tc.raw) != "" {
++			t.Errorf("URI unexpectedly became dial input: %q", tc.raw)
++		}
++	}
++	for _, raw := range []string{
++		"tel:+12025550123;ext=9", "tel:12345;phone-context=+1", "tel:12345;isub=9",
++		"tel:12345;transport=tcp", "tel:12345;user=phone;user=phone",
++		"sip:12345;user=phone@ims.example;user=phone", "tel:12%20345", "tel:(%2B12345)",
++		"unknown:12345@ims.example", "12345:password@ims.example", "tel:12345?ext=9", "tel:12345#9", "tel:12345@ims.example",
++		"tel:anonymous", "tel:", "tel:+", "tel:++12345", "tel:%252B12345", "tel:12%ZZ345",
++		"tel:12%00345", "tel:12%0A345", "tel:12%7F345", "tel:12%C2%85345",
++		"tel:12345%3Bext%3D9", "tel:+1202 5550123", "tel:123456789012345678901",
++		"sip:%252B12345@ims.example", "sip:12345%3Bext%3D9@ims.example",
++		"sip:12345@ims.example;phone-context=+1", "sip:12345@ims.example;isub=9",
++		"sip:12345@ims.example;transport=tcp;transport=udp",
++		"sip:12345@ims.example;user=phone?header=x",
++		"\nsip:12345@ims.example", "tel:12345\r", "sip:12345@ims.example\x00",
++	} {
++		if got := mu300CallerNumber(raw); got != raw {
++			t.Errorf("unsafe projection %q => %q", raw, got)
++		}
++	}
++	if mu300CallerIdentity("tel:0012025550123") == mu300CallerIdentity("+12025550123") {
++		t.Fatal("rewrote international prefix")
++	}
++}
++
++func TestMU300TELPlainAndSIPKeepCallAndHistoryIdentity(t *testing.T) {
++	forms := []string{"+12025550123", "tel:%2B1-202-555-0123", "sips:%2B12025550123@ims.example;user=phone;transport=tls", "sip:+12025550123;user=phone@ims.example", "+12025550123@ims.example"}
++	for _, first := range forms {
++		for _, second := range forms {
++			t.Run(first+"->"+second, func(t *testing.T) {
++				a := testMU300Calls(t, nil)
++				now := time.Now()
++				a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: first}}, now, true)
++				id := a.calls.Active.ID
++				a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: second}}, now.Add(time.Second), true)
++				if a.calls.Active.ID != id || a.calls.Active.AndroidID != id || a.calls.Active.Number != "+12025550123" || len(a.calls.History) != 0 {
++					t.Fatal("format change replaced a live call")
++				}
++				a.mu300ApplyCallPollWithEnd(nil, now.Add(2*time.Second), true, id)
++				snapshot := a.callStatusSnapshot()
++				if len(snapshot.History) != 1 || snapshot.History[0].ID != id || snapshot.History[0].AndroidID != id || snapshot.History[0].Number != "+12025550123" {
++					t.Fatal("history lost canonical number or identity")
++				}
++			})
++		}
++	}
++}
++
++func TestMU300SemanticTELAddressesDoNotMerge(t *testing.T) {
++	for _, pair := range [][2]string{
++		{"tel:12345;ext=1", "tel:12345;ext=2"},
++		{"tel:12345;phone-context=+1", "tel:12345;phone-context=+2"},
++		{"tel:12345;isub=1", "tel:12345"},
++		{"tel:0012025550123", "tel:+12025550123"},
++	} {
++		if mu300CallerIdentity(pair[0]) == mu300CallerIdentity(pair[1]) {
++			t.Fatal("merged distinct identities", pair)
++		}
++		a := testMU300Calls(t, nil)
++		now := time.Now()
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: pair[0]}}, now, true)
++		id := a.calls.Active.ID
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: pair[1]}}, now.Add(time.Second), true)
++		if a.calls.Active.ID == id || len(a.calls.History) != 1 {
++			t.Fatal("different caller inherited identity")
++		}
++	}
++}
++
++func TestMU300SharedClientCallerVectors(t *testing.T) {
++	data, err := os.ReadFile("testdata/caller-number-cases.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var cases [][2]string
++	if err = json.Unmarshal(data, &cases); err != nil {
++		t.Fatal(err)
++	}
++	if len(cases) != 33 {
++		t.Fatalf("unexpected shared vector count: %d", len(cases))
++	}
++	for _, tc := range cases {
++		if got := mu300CallerNumber(tc[0]); got != tc[1] {
++			t.Errorf("%q => %q want %q", tc[0], got, tc[1])
++		}
 +	}
 +}
 diff --git a/module/module-agent/mu300_calls.go b/module/module-agent/mu300_calls.go
@@ -5500,31 +5653,82 @@ index 0000000..cb34c3c
 +}
 diff --git a/module/module-agent/mu300_signal.go b/module/module-agent/mu300_signal.go
 new file mode 100644
-index 0000000..ab676f2
+index 0000000..9a9a067
 --- /dev/null
 +++ b/module/module-agent/mu300_signal.go
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,107 @@
 +package main
 +
 +import (
++	"bytes"
 +	"context"
 +	"encoding/json"
++	"errors"
 +	"math"
++	"os"
 +	"os/exec"
 +	"time"
 +)
 +
-+// Native single-SIM read-only fallback. No modem write or metadata mutex is held.
-+func mu300VendorSignalDBM() *int {
-+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-+	defer cancel()
-+	out, err := exec.CommandContext(ctx, "ubus", "call", "mu300.modem", "signal", `{"slot":"0"}`).Output()
-+	if err != nil {
-+		return nil
++// Both known firmware RPCs are read-only. Never use a direct serial port.
++// The caller checks idle before and after each request and discards results if
++// a call starts. Each request is bounded; native stderr is never surfaced.
++func mu300VendorSignalDBM(idle func() bool) *int {
++	return mu300ReadVendorSignal(mu300SignalCommand, func() bool {
++		if !idle() {
++			return false
++		}
++		for _, path := range []string{"/run/unisoc-modem-lock-apply", "/run/mu300/sim-switching", "/run/mu300/sim-active-unknown"} {
++			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
++				return false
++			}
++		}
++		return true
++	})
++}
++
++type mu300SignalOutput struct{ data bytes.Buffer }
++
++func (b *mu300SignalOutput) Len() int      { return b.data.Len() }
++func (b *mu300SignalOutput) Bytes() []byte { return b.data.Bytes() }
++
++func (b *mu300SignalOutput) Write(p []byte) (int, error) {
++	if b.Len()+len(p) > 65536 {
++		return 0, errors.New("signal response too large")
 +	}
-+	return parseMU300VendorSignal(out)
++	return b.data.Write(p)
++}
++func mu300SignalCommand(ctx context.Context, object, args string) ([]byte, error) {
++	cmd := exec.CommandContext(ctx, "ubus", "call", object, "signal", args)
++	var out mu300SignalOutput
++	cmd.Stdout = &out
++	cmd.WaitDelay = 100 * time.Millisecond
++	err := cmd.Run()
++	return out.Bytes(), err
++}
++func mu300ReadVendorSignal(run func(context.Context, string, string) ([]byte, error), idle func() bool) *int {
++	for _, rpc := range []struct{ object, args string }{{"mu300.modem", `{"slot":"0"}`}, {"mu300dash", `{}`}} {
++		if !idle() {
++			return nil
++		}
++		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++		out, err := run(ctx, rpc.object, rpc.args)
++		cancel()
++		if !idle() {
++			return nil
++		}
++		if err == nil {
++			if signal := parseMU300VendorSignalAt(out, time.Now(), rpc.object == "mu300dash"); signal != nil {
++				return signal
++			}
++		}
++	}
++	return nil
 +}
 +func parseMU300VendorSignal(out []byte) *int {
++	return parseMU300VendorSignalAt(out, time.Now(), false)
++}
++func parseMU300VendorSignalAt(out []byte, now time.Time, requireTimestamp bool) *int {
 +	if len(out) > 65536 {
 +		return nil
 +	}
@@ -5532,13 +5736,22 @@ index 0000000..ab676f2
 +		RSRP *float64 `json:"rsrp"`
 +	}
 +	var payload struct {
-+		Sig *block `json:"sig"`
-+		LTE *block `json:"lte"`
++		Sig   *block          `json:"sig"`
++		LTE   *block          `json:"lte"`
++		NR    *block          `json:"nr"`
++		TS    *int64          `json:"ts"`
++		Error json.RawMessage `json:"error"`
 +	}
-+	if json.Unmarshal(out, &payload) != nil {
++	if json.Unmarshal(out, &payload) != nil || len(payload.Error) != 0 {
 +		return nil
 +	}
-+	for _, candidate := range []*block{payload.Sig, payload.LTE} {
++	if requireTimestamp && payload.TS == nil {
++		return nil
++	}
++	if payload.TS != nil && (*payload.TS < now.Unix()-60 || *payload.TS > now.Unix()+5) {
++		return nil
++	}
++	for _, candidate := range []*block{payload.Sig, payload.NR, payload.LTE} {
 +		if candidate == nil || candidate.RSRP == nil {
 +			continue
 +		}
@@ -5551,12 +5764,165 @@ index 0000000..ab676f2
 +	}
 +	return nil
 +}
+diff --git a/module/module-agent/mu300_signal_test.go b/module/module-agent/mu300_signal_test.go
+new file mode 100644
+index 0000000..aac81ee
+--- /dev/null
++++ b/module/module-agent/mu300_signal_test.go
+@@ -0,0 +1,147 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestMU300SignalFallsBackToActualDashboardRPC(t *testing.T) {
++	var calls []string
++	got := mu300ReadVendorSignal(func(ctx context.Context, object, args string) ([]byte, error) {
++		calls = append(calls, object)
++		deadline, ok := ctx.Deadline()
++		if !ok || time.Until(deadline) > 2*time.Second {
++			t.Fatal("unbounded signal query")
++		}
++		if object == "mu300.modem" {
++			if args != `{"slot":"0"}` {
++				t.Fatal("wrong legacy arguments")
++			}
++			return nil, errors.New("object missing")
++		}
++		if object != "mu300dash" || args != `{}` {
++			t.Fatal("unexpected modem query")
++		}
++		return []byte(fmt.Sprintf(`{"ts":%d,"sig":{"rsrp":-76.1},"lte":null,"nr":{"rsrp":-76.1}}`, time.Now().Unix())), nil
++	}, func() bool { return true })
++	if got == nil || *got != -76 || len(calls) != 2 {
++		t.Fatal("dashboard RSRP not available")
++	}
++}
++
++func TestMU300SignalPreservesLegacyAndStopsOnCall(t *testing.T) {
++	calls := 0
++	run := func(context.Context, string, string) ([]byte, error) {
++		calls++
++		return []byte(`{"sig":{"rsrp":-90}}`), nil
++	}
++	if got := mu300ReadVendorSignal(run, func() bool { return true }); got == nil || *got != -90 || calls != 1 {
++		t.Fatal("working legacy path changed")
++	}
++	calls = 0
++	if got := mu300ReadVendorSignal(run, func() bool { return false }); got != nil || calls != 0 {
++		t.Fatal("active call queried")
++	}
++	if got := mu300ReadVendorSignal(run, func() bool { return calls == 0 }); got != nil || calls != 1 {
++		t.Fatal("sample survived call start")
++	}
++}
++
++func TestMU300SignalRejectsStaleErrorAndAcceptsNR(t *testing.T) {
++	now := time.Unix(1800000000, 0)
++	for _, body := range []string{
++		`{"sig":{"rsrp":-76}}`,
++		`{"ts":1799999939,"sig":{"rsrp":-76}}`,
++		`{"ts":1800000006,"sig":{"rsrp":-76}}`,
++		`{"ts":1800000000,"sig":{"rsrp":-76},"error":"busy"}`,
++		`{"ts":1800000000,"nr":{"rsrp":99}}`,
++	} {
++		if parseMU300VendorSignalAt([]byte(body), now, true) != nil {
++			t.Fatal("unreliable signal accepted")
++		}
++	}
++	got := parseMU300VendorSignalAt([]byte(`{"ts":1800000000,"sig":null,"nr":{"rsrp":-80.5},"lte":{"rsrp":-105}}`), now, true)
++	if got == nil || *got != -81 {
++		t.Fatal("NR fallback failed")
++	}
++}
++
++func TestMU300SignalOutputBound(t *testing.T) {
++	var b mu300SignalOutput
++	if _, err := b.Write(make([]byte, 65536)); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := b.Write([]byte{0}); err == nil || b.Len() != 65536 {
++		t.Fatal("signal output exceeds bound")
++	}
++}
++
++func TestMU300DashboardSignalReachesLocalStatusAndCloudHeartbeat(t *testing.T) {
++	a := testMU300Calls(t, func(cmd string, _ time.Duration) (string, error) {
++		switch cmd {
++		case "AT+CSQ":
++			return "+CSQ: 99,99\nOK", nil
++		case "AT+CPIN?":
++			return "+CPIN: READY\nOK", nil
++		case "AT+CEREG?":
++			return "+CEREG: 0,1\nOK", nil
++		case "AT+COPS?", "AT+CNUM":
++			return "OK", nil
++		}
++		t.Fatal("unexpected modem operation")
++		return "", nil
++	})
++	a.mu300RefreshModemWithSignal(func() *int {
++		return mu300ReadVendorSignal(func(_ context.Context, object, _ string) ([]byte, error) {
++			if object == "mu300.modem" {
++				return nil, errors.New("absent")
++			}
++			return []byte(fmt.Sprintf(`{"ts":%d,"sig":{"rsrp":-76.1}}`, time.Now().Unix())), nil
++		}, a.mu300MetadataIdle)
++	})
++	w := httptest.NewRecorder()
++	a.status(w, httptest.NewRequest("GET", "/api/status", nil))
++	var local struct {
++		Signal *int `json:"signal_dbm"`
++	}
++	if json.Unmarshal(w.Body.Bytes(), &local) != nil || local.Signal == nil || *local.Signal != -76 {
++		t.Fatal("local signal not exposed")
++	}
++	received := make(chan int, 1)
++	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var body struct {
++			Signal *int `json:"signal_dbm"`
++		}
++		if r.URL.Path != "/v1/events/heartbeat" || json.NewDecoder(r.Body).Decode(&body) != nil || body.Signal == nil {
++			t.Error("heartbeat signal missing")
++			w.WriteHeader(400)
++			return
++		}
++		received <- *body.Signal
++		w.WriteHeader(202)
++	}))
++	defer server.Close()
++	m := newPushManager(filepath.Join(t.TempDir(), "push.json"))
++	m.client = server.Client()
++	if err := m.store(testPushRegistration(server.URL)); err != nil {
++		t.Fatal(err)
++	}
++	if err := m.sendHeartbeat(agentHeartbeatSnapshot{CellularState: "registered", SignalDBM: a.modem.SignalDBM}); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case v := <-received:
++		if v != *local.Signal {
++			t.Fatal("cloud signal differs")
++		}
++	default:
++		t.Fatal("no heartbeat")
++	}
++}
 diff --git a/module/module-agent/mu300_sms.go b/module/module-agent/mu300_sms.go
 new file mode 100644
-index 0000000..a4bc1a6
+index 0000000..27d333f
 --- /dev/null
 +++ b/module/module-agent/mu300_sms.go
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,470 @@
 +package main
 +
 +import (
@@ -5583,12 +5949,14 @@ index 0000000..a4bc1a6
 +// Only read the native daemon's atomically written pool. In particular, do not
 +// use `show` (marks read), sync, CMGF/CPMS or delete the SIM's/pool's messages.
 +type mu300SMSBackend struct {
-+	mu          sync.Mutex
-+	sendMu      sync.Mutex
-+	pool, state string
-+	seen        map[string]bool
-+	initialized bool
-+	runSend     func(context.Context, string) (string, error)
++	mu                          sync.Mutex
++	sendMu                      sync.Mutex
++	pool, state                 string
++	poolRoot, source            string
++	lastSuccess, compatCaptured int64
++	seen                        map[string]bool
++	initialized                 bool
++	runSend                     func(context.Context, string) (string, error)
 +}
 +
 +var mu300PoolID = regexp.MustCompile(`^[0-9]{1,12}$`)
@@ -5596,7 +5964,7 @@ index 0000000..a4bc1a6
 +var mu300SentReply = regexp.MustCompile(`^sent \((?:reference )?[0-9]+\)$`)
 +
 +func newMU300SMSBackend(dataDir string) *mu300SMSBackend {
-+	return &mu300SMSBackend{pool: mu300SMSPool("/"), state: filepath.Join(dataDir, "mu300-sms"), runSend: runMU300SMSSend}
++	return &mu300SMSBackend{pool: mu300SMSPool("/"), poolRoot: "/", source: "unavailable", state: filepath.Join(dataDir, "mu300-sms"), runSend: runMU300SMSSend}
 +}
 +
 +func readMU300PrivateFile(path string, limit int64) ([]byte, error) {
@@ -5664,6 +6032,23 @@ index 0000000..a4bc1a6
 +}
 +
 +func (b *mu300SMSBackend) snapshot() ([]storedSMS, error) {
++	if err := b.selectSource(); err != nil {
++		return nil, err
++	}
++	if b.source == "native_json" {
++		items, err := b.nativeJSONSnapshot()
++		if err == nil {
++			sortMU300SMS(items)
++		}
++		return items, err
++	}
++	if b.source == "compat" {
++		items, err := b.compatSnapshot()
++		if err == nil {
++			sortMU300SMS(items)
++		}
++		return items, err
++	}
 +	d, err := os.Open(b.pool)
 +	if err != nil {
 +		return nil, errors.New("native SMS pool unavailable")
@@ -5698,13 +6083,17 @@ index 0000000..a4bc1a6
 +			items = append(items, item)
 +		}
 +	}
++	sortMU300SMS(items)
++	return items, nil
++}
++
++func sortMU300SMS(items []storedSMS) {
 +	sort.Slice(items, func(i, j int) bool {
 +		if items[i].Message.Timestamp.Equal(items[j].Message.Timestamp) {
 +			return items[i].Message.DeliveryID < items[j].Message.DeliveryID
 +		}
 +		return items[i].Message.Timestamp.After(items[j].Message.Timestamp)
 +	})
-+	return items, nil
 +}
 +
 +func (b *mu300SMSBackend) loadAcks() (map[string]bool, error) {
@@ -5781,6 +6170,7 @@ index 0000000..a4bc1a6
 +		a.setSMSError(err)
 +		return
 +	}
++	b.lastSuccess = time.Now().Unix()
 +	seen := make(map[string]bool, len(items))
 +	pending := []storedSMS{}
 +	push := []smsMessage{}
@@ -6113,10 +6503,10 @@ index 0000000..5b1a8e1
 +}
 diff --git a/module/module-agent/mu300_sms_compat.go b/module/module-agent/mu300_sms_compat.go
 new file mode 100644
-index 0000000..a5e4871
+index 0000000..5eea102
 --- /dev/null
 +++ b/module/module-agent/mu300_sms_compat.go
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,126 @@
 +package main
 +
 +import (
@@ -6125,8 +6515,10 @@ index 0000000..a5e4871
 +	"io"
 +	"os"
 +	"os/exec"
++	"path/filepath"
 +	"regexp"
 +	"strings"
++	"time"
 +)
 +
 +// Select once before submission; never probe by submitting or retry another mode.
@@ -6182,8 +6574,15 @@ index 0000000..a5e4871
 +	return nil, errors.New("invalid SMS send mode")
 +}
 +func runMU300SMSSend(ctx context.Context, input string) (string, error) {
-+	const executable = "/opt/mu300/bin/mu300-sms"
-+	configured, err := readMU300PrivateFile(mu300SMSModePath, 64)
++	return runMU300SMSSendFrom(ctx, input, "/", mu300SMSSendPins())
++}
++
++func runMU300SMSSendFrom(ctx context.Context, input, root string, pins map[string]string) (string, error) {
++	executable, fallback, err := selectMU300SMSSender(root, pins)
++	if err != nil {
++		return "", err
++	}
++	configured, err := readMU300PrivateFile(filepath.Join(root, mu300SMSModePath), 64)
 +	if err != nil && !errors.Is(err, os.ErrNotExist) {
 +		return "", errors.New("native SMS send profile unavailable")
 +	}
@@ -6195,16 +6594,37 @@ index 0000000..a5e4871
 +	if len(script) > 262144 {
 +		script = nil
 +	}
-+	mode, err := mu300SMSSendMode(script, strings.TrimSpace(string(configured)))
-+	if err != nil {
-+		return "", err
++	var mode string
++	if fallback {
++		// The reviewed shell tool uses command substitution for stdin, which
++		// strips trailing LF. Refuse instead of silently changing the message.
++		if strings.HasSuffix(input, "\n") {
++			return "", errors.New("compatibility SMS sender cannot preserve a trailing newline")
++		}
++		switch strings.TrimSpace(string(configured)) {
++		case "", "auto", "stdin":
++			mode = "stdin"
++		default:
++			return "", errors.New("verified compatibility sender requires stdin mode")
++		}
++	} else {
++		mode, err = mu300SMSSendMode(script, strings.TrimSpace(string(configured)))
++		if err != nil {
++			return "", err
++		}
 +	}
 +	cmd, err := mu300SMSCommand(ctx, executable, mode, input)
 +	if err != nil {
 +		return "", err
 +	}
-+	out, err := cmd.Output()
-+	return string(out), err
++	if fallback {
++		cmd.Env = mu300SMSFallbackEnv(os.Environ())
++	}
++	var out mu300SMSSendOutput
++	cmd.Stdout = &out
++	cmd.WaitDelay = time.Second
++	err = cmd.Run()
++	return out.data.String(), err
 +}
 +
 +// Only a complete final receipt line plus successful process exit is accepted.
@@ -6326,12 +6746,874 @@ index 0000000..54db0f6
 +		t.Fatal("fabricated identity on restart")
 +	}
 +}
+diff --git a/module/module-agent/mu300_sms_native_json.go b/module/module-agent/mu300_sms_native_json.go
+new file mode 100644
+index 0000000..9f57a58
+--- /dev/null
++++ b/module/module-agent/mu300_sms_native_json.go
+@@ -0,0 +1,82 @@
++package main
++
++// Independently implemented reader for the documented E5 native inbox v1.
++// Source contract: sprd-linux-devs/e5-linux@fb2d3fefaffe95eba9216d874b40bcd2a523701e,
++// openwrt/overlay/usr/libexec/e5-sms-receive. No receiver code is copied or run.
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"time"
++	"unicode/utf8"
++)
++
++func (b *mu300SMSBackend) nativeJSONSnapshot() ([]storedSMS, error) {
++	data, err := readMU300CompatFile(filepath.Join(b.poolRoot, "etc/e5-sms/inbox.json"))
++	if err != nil {
++		return nil, errors.New("native JSON SMS inbox unavailable or unsafe")
++	}
++	return parseMU300NativeJSON(data)
++}
++
++func parseMU300NativeJSON(data []byte) ([]storedSMS, error) {
++	bad := errors.New("native JSON SMS inbox invalid; messages preserved")
++	if len(data) > 16<<20 || !utf8.Valid(data) {
++		return nil, bad
++	}
++	var inbox struct {
++		Version  int `json:"version"`
++		Messages []struct {
++			ID        int64  `json:"id"`
++			Card      *int   `json:"card"`
++			Identity  string `json:"identity"`
++			Number    string `json:"number"`
++			Text      string `json:"text"`
++			Time      string `json:"time"`
++			Epoch     *int64 `json:"epoch"`
++			State     string `json:"state"`
++			Direction string `json:"direction"`
++			Deleted   bool   `json:"deleted"`
++		} `json:"messages"`
++	}
++	if json.Unmarshal(data, &inbox) != nil || inbox.Version != 1 || inbox.Messages == nil || len(inbox.Messages) > 10000 {
++		return nil, bad
++	}
++	items := make([]storedSMS, 0, len(inbox.Messages))
++	ids := make(map[int64]bool, len(inbox.Messages))
++	for _, m := range inbox.Messages {
++		if m.ID < 1000000000 || m.ID > 999999999999 || ids[m.ID] || m.Card == nil || (*m.Card != 0 && *m.Card != 1) || (m.Direction != "in" && m.Direction != "out") {
++			return nil, bad
++		}
++		ids[m.ID] = true
++		// This MU300 profile supports only account 0 (SIM 1). Do not silently
++		// relabel the other physical SIM, nor publish unfinished multipart SMS.
++		if *m.Card != 0 || m.Deleted || m.Direction == "out" {
++			continue
++		}
++		if m.State == "receiving" {
++			continue
++		}
++		if m.State != "received" || m.Identity == "" || len(m.Identity) > 256 || m.Number == "" || len(m.Number) > 256 || strings.ContainsAny(m.Number, "\r\n\x00") || len(m.Text) < 1 || len(m.Text) > 65536 {
++			return nil, bad
++		}
++		stamp, err := time.Parse(time.RFC3339Nano, m.Time)
++		if err != nil || stamp.Unix() <= 0 || stamp.Unix() > 4102444800 || (m.Epoch != nil && *m.Epoch != stamp.Unix()) {
++			return nil, bad
++		}
++		// Native id and SIM identity survive restart; read/deleted flags, storage
++		// indices and collection time must never change delivery_id.
++		identity, _ := json.Marshal([]string{"e5-v1", strconv.FormatInt(m.ID, 10), m.Identity, m.Number, stamp.UTC().Format(time.RFC3339Nano), m.Text})
++		digest := sha256.Sum256(identity)
++		message := smsMessage{SIMSlot: "SIM 1", Sender: m.Number, Content: m.Text, Timestamp: stamp.UTC(), DeliveryID: "mu300-e5-" + hex.EncodeToString(digest[:])}
++		if code := verificationCodePattern.FindStringSubmatch(m.Text); len(code) > 1 {
++			message.Code = code[1]
++		}
++		items = append(items, storedSMS{Memory: "MU300_NATIVE_JSON", Message: message})
++	}
++	return items, nil
++}
+diff --git a/module/module-agent/mu300_sms_native_json_test.go b/module/module-agent/mu300_sms_native_json_test.go
+new file mode 100644
+index 0000000..6169f8f
+--- /dev/null
++++ b/module/module-agent/mu300_sms_native_json_test.go
+@@ -0,0 +1,132 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++const mu300NativeJSONFixture = `{"version":1,"next_id":1000000001,"initialized":["0:fixture"],"updated":1,"messages":[{"id":1000000000,"card":0,"sim":"SIM1","identity":"fixture","number":"fixture-sender","text":"测试 123456\nsecond line","time":"2026-11-23T18:00:00+08:00","state":"received","direction":"in","unread":true}]}`
++
++func nativeJSONFixture(t *testing.T) (*agent, string) {
++	t.Helper()
++	a, _, _ := compatSMSFixture(t)
++	path := filepath.Join(a.mu300SMS.poolRoot, "etc/e5-sms/inbox.json")
++	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, []byte(mu300NativeJSONFixture), 0600); err != nil {
++		t.Fatal(err)
++	}
++	return a, path
++}
++
++func TestMU300NativeJSONAutoSelectionAndPhoneInbox(t *testing.T) {
++	a, path := nativeJSONFixture(t)
++	before, _ := os.ReadFile(path)
++	a.mu300RefreshSMS()
++	if a.smsError != "" || a.mu300SMS.source != "native_json" || len(a.messages) != 1 {
++		t.Fatalf("native JSON not selected: %s", a.smsError)
++	}
++	m := a.messages[0].Message
++	if m.SIMSlot != "SIM 1" || m.Code != "123456" || m.Timestamp.Format("2006-01-02T15:04:05Z07:00") != "2026-11-23T10:00:00Z" {
++		t.Fatal("native message projection changed")
++	}
++	w := httptest.NewRecorder()
++	a.smsList(w, httptest.NewRequest("GET", "/api/sms", nil))
++	if w.Code != 200 || !strings.Contains(w.Body.String(), m.DeliveryID) {
++		t.Fatal("phone inbox missing native message")
++	}
++	if _, err := a.mu300AckSMS([]string{m.DeliveryID}); err != nil {
++		t.Fatal(err)
++	}
++	restarted := smsFixture(t)
++	restarted.mu300SMS.poolRoot, restarted.mu300SMS.state = a.mu300SMS.poolRoot, a.mu300SMS.state
++	restarted.mu300RefreshSMS()
++	if restarted.smsError != "" || len(restarted.messages) != 0 {
++		t.Fatal("ack did not survive restart")
++	}
++	after, _ := os.ReadFile(path)
++	if string(before) != string(after) {
++		t.Fatal("native inbox mutated")
++	}
++}
++
++func TestMU300NativeJSONIdentityIgnoresReadFlagsAndIndex(t *testing.T) {
++	one, err := parseMU300NativeJSON([]byte(mu300NativeJSONFixture))
++	if err != nil {
++		t.Fatal(err)
++	}
++	changed := strings.Replace(mu300NativeJSONFixture, `"unread":true`, `"unread":false,"parts":[{"index":99}]`, 1)
++	two, err := parseMU300NativeJSON([]byte(changed))
++	if err != nil || one[0].Message.DeliveryID != two[0].Message.DeliveryID {
++		t.Fatal("read/index change caused redelivery")
++	}
++	changed = strings.Replace(mu300NativeJSONFixture, `"identity":"fixture"`, `"identity":"replacement-sim"`, 1)
++	two, err = parseMU300NativeJSON([]byte(changed))
++	if err != nil || one[0].Message.DeliveryID == two[0].Message.DeliveryID {
++		t.Fatal("new SIM suppressed")
++	}
++}
++
++func TestMU300NativeJSONFiltersOutgoingPartialDeletedAndOtherSIM(t *testing.T) {
++	for _, changes := range [][2]string{{`"direction":"in"`, `"direction":"out"`}, {`"state":"received"`, `"state":"receiving"`}, {`"unread":true`, `"unread":true,"deleted":true`}, {`"card":0`, `"card":1`}} {
++		items, err := parseMU300NativeJSON([]byte(strings.Replace(mu300NativeJSONFixture, changes[0], changes[1], 1)))
++		if err != nil || len(items) != 0 {
++			t.Fatal("nonreceivable/other-SIM item exposed")
++		}
++	}
++}
++
++func TestMU300NativeJSONInvalidStatePreservesPreviousInbox(t *testing.T) {
++	for _, changes := range [][2]string{{`"version":1`, `"version":2`}, {`"card":0`, `"card":null`}, {`"time":"2026-11-23T18:00:00+08:00"`, `"time":"2026-11-23 18:00:00"`}, {`"state":"received"`, `"state":"unknown"`}, {`"unread":true`, `"epoch":1`}} {
++		a, path := nativeJSONFixture(t)
++		a.mu300RefreshSMS()
++		id := a.messages[0].Message.DeliveryID
++		if err := os.WriteFile(path, []byte(strings.Replace(mu300NativeJSONFixture, changes[0], changes[1], 1)), 0600); err != nil {
++			t.Fatal(err)
++		}
++		a.mu300RefreshSMS()
++		if a.smsError == "" || len(a.messages) != 1 || a.messages[0].Message.DeliveryID != id || a.mu300SMS.source != "native_json" {
++			t.Fatal("invalid native JSON hidden by compat snapshot or cleared inbox")
++		}
++	}
++	for _, data := range []string{`{"version":1}`, `{"version":1,"messages":null}`, `{"version":1,"messages":[`, mu300NativeJSONFixture + ` {}`} {
++		if _, err := parseMU300NativeJSON([]byte(data)); err == nil {
++			t.Fatal("incomplete JSON accepted")
++		}
++	}
++	var d map[string]any
++	json.Unmarshal([]byte(mu300NativeJSONFixture), &d)
++	d["messages"] = append(d["messages"].([]any), d["messages"].([]any)[0])
++	data, _ := json.Marshal(d)
++	if _, err := parseMU300NativeJSON(data); err == nil {
++		t.Fatal("duplicate id accepted")
++	}
++}
++
++func TestMU300NativeJSONDeletionAndNativePoolPriority(t *testing.T) {
++	a, path := nativeJSONFixture(t)
++	a.mu300RefreshSMS()
++	if err := os.WriteFile(path, []byte(`{"version":1,"messages":[]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	a.mu300RefreshSMS()
++	if a.smsError != "" || len(a.messages) != 0 {
++		t.Fatal("complete native empty not reflected")
++	}
++	if err := os.WriteFile(path, []byte(`invalid`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	pool := filepath.Join(a.mu300SMS.poolRoot, "etc/mu300/sms-pool/msg")
++	if err := os.MkdirAll(pool, 0700); err != nil {
++		t.Fatal(err)
++	}
++	a.mu300RefreshSMS()
++	if a.smsError != "" || a.mu300SMS.source != "native" {
++		t.Fatal("native pool no longer authoritative")
++	}
++}
+diff --git a/module/module-agent/mu300_sms_sender.go b/module/module-agent/mu300_sms_sender.go
+new file mode 100644
+index 0000000..8fe1048
+--- /dev/null
++++ b/module/module-agent/mu300_sms_sender.go
+@@ -0,0 +1,117 @@
++package main
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++)
++
++// Existing vendor tools only, not bundled or overwritten. These hashes pin the
++// reviewed send/stdin, codec and broker contracts at dikeckaan/mu300-linux
++// 833616a6c03a7c0245300c5946d98ec98b09bb94. Unknown variants require review.
++func mu300SMSSendPins() map[string]string {
++	return map[string]string{
++		"opt/mu300/bin/sms":         "bdd3fe96ab4abf1927b7a9d17609426948dbe7904b33694b009b6c452ed82394",
++		"opt/mu300/bin/mu300-at":    "de903956c3e86b4d88281bba2d4c985cad7832b85117710b715d6633f79f819d",
++		"opt/mu300/lib/sms-pdu.awk": "50f3e461a1c3bae04d528376a381843f8d775f6bb5aa20c7395385147759059b",
++	}
++}
++
++func selectMU300SMSSender(root string, pins map[string]string) (string, bool, error) {
++	primary := filepath.Join(root, "opt/mu300/bin/mu300-sms")
++	if _, err := os.Lstat(primary); !errors.Is(err, os.ErrNotExist) {
++		if err != nil {
++			return "", false, errors.New("native SMS sender inaccessible")
++		}
++		// Existing wrappers keep their contract. Failure never selects another tool.
++		return primary, false, nil
++	}
++	bad := errors.New("native SMS sender absent; no verified compatibility sender")
++	for path, want := range pins {
++		full := filepath.Join(root, path)
++		st, err := os.Lstat(full)
++		if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0022 != 0 {
++			return "", false, bad
++		}
++		owner, ok := st.Sys().(*syscall.Stat_t)
++		if !ok || owner.Uid != uint32(os.Geteuid()) {
++			return "", false, bad
++		}
++		if strings.Contains(path, "/bin/") && st.Mode().Perm()&0100 == 0 {
++			return "", false, bad
++		}
++		data, err := readMU300PrivateFile(full, 262144)
++		if err != nil {
++			return "", false, bad
++		}
++		digest := sha256.Sum256(data)
++		if hex.EncodeToString(digest[:]) != want {
++			return "", false, bad
++		}
++	}
++	// Only the reviewed single-broker layout is supported here. Do not route
++	// a send while the physical SIM or ownership is transitioning.
++	for _, p := range []string{"run/mu300-radio-freeze", "run/mu300/sim-switching", "run/mu300/sim-active-unknown", "run/mu300/sim-sequence"} {
++		if _, err := os.Lstat(filepath.Join(root, p)); !errors.Is(err, os.ErrNotExist) {
++			return "", false, bad
++		}
++	}
++	st, err := os.Lstat(filepath.Join(root, "run/mu300-at/cmd"))
++	if err != nil || st.Mode()&os.ModeNamedPipe == 0 {
++		return "", false, bad
++	}
++	raw, err := readMU300PrivateFile(filepath.Join(root, "run/mu300-at/owner/pid"), 32)
++	pid := strings.TrimSpace(string(raw))
++	n, parseErr := strconv.Atoi(pid)
++	if err != nil || parseErr != nil || n <= 1 || strconv.Itoa(n) != pid {
++		return "", false, bad
++	}
++	raw, err = readMU300PrivateFile(filepath.Join(root, "proc", pid, "cmdline"), 4096)
++	if err != nil {
++		return "", false, bad
++	}
++	ownerFound := false
++	for _, arg := range bytes.Split(raw, []byte{0}) {
++		base := filepath.Base(string(arg))
++		if base == "mu300-atd" || base == "mu300-atd-io" {
++			ownerFound = true
++		}
++	}
++	if !ownerFound {
++		return "", false, bad
++	}
++	return filepath.Join(root, "opt/mu300/bin/sms"), true, nil
++}
++
++func mu300SMSFallbackEnv(inherited []string) []string {
++	var env []string
++	for _, value := range inherited {
++		key, _, _ := strings.Cut(value, "=")
++		if strings.HasPrefix(key, "MU300_") || key == "PATH" || key == "LC_ALL" {
++			continue
++		}
++		env = append(env, value)
++	}
++	return append(env,
++		"PATH=/opt/mu300/bin:/opt/mu300/busybox-bin:/usr/sbin:/usr/bin:/sbin:/bin",
++		"LC_ALL=C", "MU300_AT_DIR=/run/mu300-at", "MU300_AT_LOCK_WAIT=2",
++		"MU300_SMS_AWK=/opt/mu300/lib/sms-pdu.awk",
++		// Even if the broker disappears after preflight, the reviewed tool must
++		// fail opening this nonexistent proc entry instead of opening a tty.
++		"MU300_AT_DEV=/proc/airsim-no-direct-modem")
++}
++
++type mu300SMSSendOutput struct{ data bytes.Buffer }
++
++func (b *mu300SMSSendOutput) Write(p []byte) (int, error) {
++	if b.data.Len()+len(p) > 65536 {
++		return 0, errors.New("SMS sender output exceeds limit")
++	}
++	return b.data.Write(p)
++}
+diff --git a/module/module-agent/mu300_sms_sender_test.go b/module/module-agent/mu300_sms_sender_test.go
+new file mode 100644
+index 0000000..d0b05fe
+--- /dev/null
++++ b/module/module-agent/mu300_sms_sender_test.go
+@@ -0,0 +1,144 @@
++package main
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++)
++
++func smsSenderFixture(t *testing.T) (string, map[string]string) {
++	t.Helper()
++	root := t.TempDir()
++	pins := mu300SMSSendPins()
++	for path := range pins {
++		data := []byte("#!/bin/sh\nexit 1\n")
++		if path == "opt/mu300/bin/sms" {
++			data = []byte("#!/bin/sh\n[ \"$1:$2\" = send:--stdin ] || exit 2\nIFS= read -r phone\ntext=$(cat)\n[ \"$text\" = 'fixture\nsecond line' ] || exit 3\necho 'sent (reference 9)'\n")
++		}
++		file := filepath.Join(root, path)
++		if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(file, data, 0700); err != nil {
++			t.Fatal(err)
++		}
++		digest := sha256.Sum256(data)
++		pins[path] = hex.EncodeToString(digest[:])
++	}
++	for _, path := range []string{"run/mu300-at/owner", "proc/1234"} {
++		if err := os.MkdirAll(filepath.Join(root, path), 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := syscall.Mkfifo(filepath.Join(root, "run/mu300-at/cmd"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, "run/mu300-at/owner/pid"), []byte("1234\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, "proc/1234/cmdline"), []byte("/bin/sh\x00/opt/mu300/bin/mu300-atd\x00"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	return root, pins
++}
++
++func TestMU300MissingSenderUsesOnlyVerifiedStdinTool(t *testing.T) {
++	root, pins := smsSenderFixture(t)
++	tool, fallback, err := selectMU300SMSSender(root, pins)
++	if err != nil || !fallback || tool != filepath.Join(root, "opt/mu300/bin/sms") {
++		t.Fatal("verified fallback not selected", err)
++	}
++	out, err := runMU300SMSSendFrom(context.Background(), "15550000001\nfixture\nsecond line", root, pins)
++	if err != nil || !mu300SMSReceipt(out) {
++		t.Fatal("multiline stdin send failed", err)
++	}
++}
++
++func TestMU300SenderFallbackRejectsUnknownToolsAndLostBroker(t *testing.T) {
++	for _, kind := range []string{"script", "codec", "broker-script", "permissions", "fifo", "owner", "transition", "mode"} {
++		t.Run(kind, func(t *testing.T) {
++			root, pins := smsSenderFixture(t)
++			var err error
++			switch kind {
++			case "script":
++				err = os.WriteFile(filepath.Join(root, "opt/mu300/bin/sms"), []byte("#!/bin/sh\nexit 0\n"), 0700)
++			case "codec":
++				err = os.WriteFile(filepath.Join(root, "opt/mu300/lib/sms-pdu.awk"), []byte("changed"), 0700)
++			case "broker-script":
++				err = os.Remove(filepath.Join(root, "opt/mu300/bin/mu300-at"))
++			case "permissions":
++				err = os.Chmod(filepath.Join(root, "opt/mu300/bin/sms"), 0777)
++			case "fifo":
++				err = os.Remove(filepath.Join(root, "run/mu300-at/cmd"))
++			case "owner":
++				err = os.WriteFile(filepath.Join(root, "proc/1234/cmdline"), []byte("unrelated"), 0600)
++			case "transition":
++				err = os.WriteFile(filepath.Join(root, "run/mu300-radio-freeze"), nil, 0600)
++			case "mode":
++				if e := os.MkdirAll(filepath.Join(root, "etc/mu300"), 0700); e != nil {
++					t.Fatal(e)
++				}
++				err = os.WriteFile(filepath.Join(root, mu300SMSModePath), []byte("positional"), 0600)
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			if _, err = runMU300SMSSendFrom(context.Background(), "15550000001\nfixture\nsecond line", root, pins); err == nil {
++				t.Fatal("unsafe sender accepted")
++			}
++		})
++	}
++}
++
++func TestMU300ExistingSenderFailureNeverFallsBack(t *testing.T) {
++	root, pins := smsSenderFixture(t)
++	path := filepath.Join(root, "opt/mu300/bin/mu300-sms")
++	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 'sent (reference 1)'\nexit 1\n"), 0700); err != nil {
++		t.Fatal(err)
++	}
++	tool, fallback, err := selectMU300SMSSender(root, pins)
++	if err != nil || fallback || tool != path {
++		t.Fatal("native sender bypassed")
++	}
++	out, err := runMU300SMSSendFrom(context.Background(), "15550000001\nfixture\nsecond line", root, pins)
++	if err == nil || strings.Contains(out, "reference 9") {
++		t.Fatal("failed native send retried through fallback")
++	}
++	if err := os.Remove(path); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink(path+".absent", path); err != nil {
++		t.Fatal(err)
++	}
++	if _, fallback, err = selectMU300SMSSender(root, pins); err != nil || fallback {
++		t.Fatal("broken existing sender silently bypassed")
++	}
++}
++
++func TestMU300SenderEnvironmentCannotOpenDirectTTY(t *testing.T) {
++	env := mu300SMSFallbackEnv([]string{"MU300_AT_DEV=/dev/stty_nr1", "MU300_AT_LOCK_HELD=1234", "MU300_SIM_CONTROL=1", "MU300_SMS_AWK=/tmp/evil", "PATH=/tmp", "LC_ALL=zh_CN.UTF-8", "KEEP=fixture"})
++	all := strings.Join(env, "\n")
++	if strings.Contains(all, "/dev/stty") || strings.Contains(all, "/tmp") || strings.Contains(all, "LOCK_HELD") || strings.Contains(all, "SIM_CONTROL") || !strings.Contains(all, "MU300_AT_DEV=/proc/airsim-no-direct-modem") || !strings.Contains(all, "KEEP=fixture") {
++		t.Fatal("unsafe inherited modem override retained")
++	}
++	var out mu300SMSSendOutput
++	if _, err := out.Write(make([]byte, 65536)); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := out.Write([]byte{0}); err == nil {
++		t.Fatal("unbounded native output")
++	}
++}
++
++func TestMU300CompatibilitySenderDoesNotSilentlyTrimBody(t *testing.T) {
++	root, pins := smsSenderFixture(t)
++	out, err := runMU300SMSSendFrom(context.Background(), "15550000001\nfixture\nsecond line\n", root, pins)
++	if err == nil || out != "" {
++		t.Fatal("trailing newline was silently trimmed and submitted")
++	}
++}
+diff --git a/module/module-agent/mu300_sms_source.go b/module/module-agent/mu300_sms_source.go
+new file mode 100644
+index 0000000..17555cd
+--- /dev/null
++++ b/module/module-agent/mu300_sms_source.go
+@@ -0,0 +1,156 @@
++package main
++
++// The compatibility producer is a separate, reviewed firmware adapter. The
++// Agent only reads its atomic snapshot; it never probes a modem or starts a
++// script to repair a missing inbox.
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"time"
++	"unicode/utf8"
++)
++
++type mu300SMSCompatEntry struct {
++	ID       string `json:"id"`
++	From     string `json:"from"`
++	SCTS     string `json:"scts"`
++	Received int64  `json:"received"`
++	Length   int    `json:"length"`
++	Body     string `json:"body"`
++}
++
++type mu300SMSCompatSnapshot struct {
++	Version    int                   `json:"version"`
++	Complete   bool                  `json:"complete"`
++	CapturedAt int64                 `json:"captured_at"`
++	Messages   []mu300SMSCompatEntry `json:"messages"`
++}
++
++// Must be called with b.mu held, as must snapshot(). Native empty inboxes are
++// authoritative. Invalid/unreadable native paths fail closed instead of hiding
++// a native failure behind potentially unrelated compatibility data.
++func (b *mu300SMSBackend) selectSource() error {
++	if b.poolRoot == "" { // Explicit pool supplied by isolated fixtures.
++		b.source = "native"
++		return nil
++	}
++	for _, name := range []string{"etc/mu300/sms-pool/msg", "etc/mu300/sms/msg"} {
++		path := filepath.Join(b.poolRoot, name)
++		st, err := os.Lstat(path)
++		if errors.Is(err, os.ErrNotExist) {
++			continue
++		}
++		b.source = "native"
++		if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
++			return errors.New("native SMS pool inaccessible; compatibility fallback blocked")
++		}
++		b.pool = path
++		return nil
++	}
++	// Some derivative firmware archives received SMS in native JSON instead.
++	path := filepath.Join(b.poolRoot, "etc/e5-sms/inbox.json")
++	st, err := os.Lstat(path)
++	if !errors.Is(err, os.ErrNotExist) {
++		b.source = "native_json"
++		if err != nil || !st.Mode().IsRegular() {
++			return errors.New("native JSON SMS inbox inaccessible")
++		}
++		return nil
++	}
++	b.source = "compat"
++	return nil
++}
++
++func readMU300CompatFile(path string) ([]byte, error) {
++	// Runtime snapshot and its immediate directory must be private and owned by
++	// the Agent user (root on the device). Reject symlinks in every ancestor.
++	for p := path; ; p = filepath.Dir(p) {
++		st, err := os.Lstat(p)
++		if err != nil || st.Mode()&os.ModeSymlink != 0 {
++			return nil, errors.New("SMS compatibility snapshot unavailable or unsafe")
++		}
++		if p == path || p == filepath.Dir(path) {
++			owner, ok := st.Sys().(*syscall.Stat_t)
++			if !ok || owner.Uid != uint32(os.Geteuid()) || st.Mode().Perm()&0077 != 0 {
++				return nil, errors.New("SMS compatibility snapshot permissions invalid")
++			}
++		}
++		if p == path && !st.Mode().IsRegular() || p != path && !st.IsDir() {
++			return nil, errors.New("SMS compatibility snapshot type invalid")
++		}
++		if p == filepath.Dir(p) {
++			break
++		}
++	}
++	data, err := readMU300PrivateFile(path, 16<<20)
++	if err != nil {
++		return nil, errors.New("cannot read SMS compatibility snapshot")
++	}
++	return data, nil
++}
++
++func parseMU300CompatSnapshot(data []byte, now time.Time) ([]storedSMS, int64, error) {
++	bad := errors.New("SMS compatibility snapshot invalid or incomplete")
++	if len(data) > 16<<20 || !utf8.Valid(data) {
++		return nil, 0, bad
++	}
++	var snapshot mu300SMSCompatSnapshot
++	d := json.NewDecoder(bytes.NewReader(data))
++	d.DisallowUnknownFields()
++	if d.Decode(&snapshot) != nil || d.Decode(new(any)) != io.EOF || snapshot.Version != 1 || !snapshot.Complete || snapshot.Messages == nil || len(snapshot.Messages) > 10000 {
++		return nil, 0, bad
++	}
++	if snapshot.CapturedAt <= 0 || snapshot.CapturedAt > now.Unix()+5 || snapshot.CapturedAt < now.Unix()-30 {
++		return nil, 0, errors.New("SMS compatibility snapshot stale or clock invalid")
++	}
++	items := make([]storedSMS, 0, len(snapshot.Messages))
++	ids := make(map[string]bool, len(snapshot.Messages))
++	for _, m := range snapshot.Messages {
++		if !mu300PoolID.MatchString(m.ID) || ids[m.ID] || m.From == "" || len(m.From) > 256 || len(m.SCTS) > 128 || strings.ContainsAny(m.From+m.SCTS, "\r\n\x00") || m.Received > snapshot.CapturedAt || m.Length != len(m.Body) {
++			return nil, 0, bad
++		}
++		ids[m.ID] = true
++		// Reuse the native parser and delivery identity, including its byte-length
++		// and timestamp checks. captured_at must NEVER enter delivery_id.
++		raw := fmt.Sprintf("dir: mt\nid: %s\nfrom: %s\nscts: %s\nreceived: %d\nlength: %d\n\n%s\n", m.ID, m.From, m.SCTS, m.Received, m.Length, m.Body)
++		item, incoming, err := parseMU300PoolMessage(m.ID, []byte(raw))
++		if err != nil || !incoming {
++			return nil, 0, bad
++		}
++		items = append(items, item)
++	}
++	return items, snapshot.CapturedAt, nil
++}
++
++func (b *mu300SMSBackend) compatSnapshot() ([]storedSMS, error) {
++	data, err := readMU300CompatFile(filepath.Join(b.poolRoot, "run/airsim/sms-compat/inbox.json"))
++	if err != nil {
++		return nil, err
++	}
++	items, captured, err := parseMU300CompatSnapshot(data, time.Now())
++	if err != nil {
++		return nil, err
++	}
++	if captured < b.compatCaptured {
++		return nil, errors.New("SMS compatibility snapshot moved backwards")
++	}
++	b.compatCaptured = captured
++	return items, nil
++}
++
++func (a *agent) mu300SMSSourceStatus() map[string]any {
++	b := a.mu300SMS
++	if b == nil {
++		return map[string]any{"source": "unavailable"}
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return map[string]any{"source": b.source, "last_success_at": b.lastSuccess, "compat_captured_at": b.compatCaptured}
++}
+diff --git a/module/module-agent/mu300_sms_source_test.go b/module/module-agent/mu300_sms_source_test.go
+new file mode 100644
+index 0000000..8270138
+--- /dev/null
++++ b/module/module-agent/mu300_sms_source_test.go
+@@ -0,0 +1,195 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++func compatSMSFixture(t *testing.T) (*agent, string, mu300SMSCompatSnapshot) {
++	t.Helper()
++	a := smsFixture(t)
++	root, err := filepath.EvalSymlinks(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	a.mu300SMS.poolRoot = root
++	path := filepath.Join(root, "run/airsim/sms-compat/inbox.json")
++	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
++		t.Fatal(err)
++	}
++	now := time.Now().Unix()
++	snapshot := mu300SMSCompatSnapshot{Version: 1, Complete: true, CapturedAt: now, Messages: []mu300SMSCompatEntry{{ID: "1", From: "fixture", SCTS: "2026-01-01 08:00:00", Received: now - 60, Body: "测试\nfixture", Length: len("测试\nfixture")}}}
++	putCompatSMS(t, path, snapshot)
++	return a, path, snapshot
++}
++
++func putCompatSMS(t *testing.T, path string, snapshot mu300SMSCompatSnapshot) {
++	t.Helper()
++	data, err := json.Marshal(snapshot)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path+".tmp", data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Rename(path+".tmp", path); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestMU300CompatInboxIdentityAckAndRestart(t *testing.T) {
++	a, path, snapshot := compatSMSFixture(t)
++	a.mu300RefreshSMS()
++	if a.smsError != "" || len(a.messages) != 1 {
++		t.Fatalf("read failed: %s", a.smsError)
++	}
++	id := a.messages[0].Message.DeliveryID
++	snapshot.CapturedAt++
++	putCompatSMS(t, path, snapshot)
++	a.mu300RefreshSMS()
++	if a.smsError != "" || a.messages[0].Message.DeliveryID != id {
++		t.Fatal("poll timestamp changed identity")
++	}
++	if _, err := a.mu300AckSMS([]string{id}); err != nil {
++		t.Fatal(err)
++	}
++	restarted := smsFixture(t)
++	restarted.mu300SMS.poolRoot, restarted.mu300SMS.state = a.mu300SMS.poolRoot, a.mu300SMS.state
++	restarted.mu300RefreshSMS()
++	if restarted.smsError != "" || len(restarted.messages) != 0 {
++		t.Fatal("restart redelivered acknowledged snapshot")
++	}
++	snapshot.Messages[0].Body = "replacement"
++	snapshot.Messages[0].Length = len("replacement")
++	putCompatSMS(t, path, snapshot)
++	restarted.mu300RefreshSMS()
++	if len(restarted.messages) != 1 || restarted.messages[0].Message.DeliveryID == id {
++		t.Fatal("reused SIM index lost new message")
++	}
++}
++
++func TestMU300CompatFailuresPreserveInbox(t *testing.T) {
++	for _, kind := range []string{"partial", "stale", "future", "missing-messages", "length", "duplicate", "injected-header", "backwards"} {
++		t.Run(kind, func(t *testing.T) {
++			a, path, snapshot := compatSMSFixture(t)
++			a.mu300RefreshSMS()
++			id := a.messages[0].Message.DeliveryID
++			switch kind {
++			case "partial":
++				snapshot.Complete = false
++			case "stale":
++				snapshot.CapturedAt -= 40
++			case "future":
++				snapshot.CapturedAt += 60
++			case "missing-messages":
++				snapshot.Messages = nil
++			case "length":
++				snapshot.Messages[0].Length--
++			case "duplicate":
++				snapshot.Messages = append(snapshot.Messages, snapshot.Messages[0])
++			case "injected-header":
++				snapshot.Messages[0].From = "fixture\nreceived: 1"
++			case "backwards":
++				snapshot.CapturedAt--
++			}
++			putCompatSMS(t, path, snapshot)
++			a.mu300RefreshSMS()
++			if a.smsError == "" || len(a.messages) != 1 || a.messages[0].Message.DeliveryID != id {
++				t.Fatal("failed scan cleared or replaced inbox")
++			}
++		})
++	}
++}
++
++func TestMU300CompatEmptySnapshotAndNativeRecovery(t *testing.T) {
++	a, path, snapshot := compatSMSFixture(t)
++	a.mu300RefreshSMS()
++	snapshot.Messages = []mu300SMSCompatEntry{}
++	putCompatSMS(t, path, snapshot)
++	a.mu300RefreshSMS()
++	if a.smsError != "" || len(a.messages) != 0 {
++		t.Fatal("complete empty snapshot rejected")
++	}
++	native := filepath.Join(a.mu300SMS.poolRoot, "etc/mu300/sms/msg")
++	if err := os.MkdirAll(native, 0700); err != nil {
++		t.Fatal(err)
++	}
++	// An invalid fallback must not affect a restored, empty native inbox.
++	if err := os.WriteFile(path, []byte("invalid"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	a.mu300RefreshSMS()
++	if a.smsError != "" || a.mu300SMS.source != "native" || len(a.messages) != 0 {
++		t.Fatal("empty native inbox not authoritative")
++	}
++	writeSMSFixture(t, a, "2", "mt", "native fixture")
++	a.mu300RefreshSMS()
++	if a.smsError != "" || len(a.messages) != 1 {
++		t.Fatal("native recovery requires restart")
++	}
++}
++
++func TestMU300CompatUnsafePathsRejected(t *testing.T) {
++	for _, kind := range []string{"file-mode", "dir-mode", "symlink", "native-file"} {
++		t.Run(kind, func(t *testing.T) {
++			a, path, _ := compatSMSFixture(t)
++			switch kind {
++			case "file-mode":
++				if err := os.Chmod(path, 0644); err != nil {
++					t.Fatal(err)
++				}
++			case "dir-mode":
++				if err := os.Chmod(filepath.Dir(path), 0755); err != nil {
++					t.Fatal(err)
++				}
++			case "symlink":
++				if err := os.Rename(path, path+".saved"); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.Symlink(path+".saved", path); err != nil {
++					t.Fatal(err)
++				}
++			case "native-file":
++				native := filepath.Join(a.mu300SMS.poolRoot, "etc/mu300/sms-pool/msg")
++				if err := os.MkdirAll(filepath.Dir(native), 0700); err != nil {
++					t.Fatal(err)
++				}
++				if err := os.WriteFile(native, []byte("invalid"), 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
++			a.mu300RefreshSMS()
++			if a.smsError == "" || len(a.messages) != 0 {
++				t.Fatal("unsafe source accepted")
++			}
++		})
++	}
++}
++
++func TestMU300CompatStatusConcurrentReadContainsNoSMS(t *testing.T) {
++	a, _, _ := compatSMSFixture(t)
++	var wg sync.WaitGroup
++	for n := 0; n < 20; n++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			a.mu300RefreshSMS()
++			w := httptest.NewRecorder()
++			a.smsStatus(w, httptest.NewRequest("GET", "/api/sms/status", nil))
++			if strings.Contains(w.Body.String(), "fixture") || w.Code != 200 {
++				t.Error("status disclosed SMS")
++			}
++		}()
++	}
++	wg.Wait()
++	status := a.mu300SMSSourceStatus()
++	if status["source"] != "compat" || status["last_success_at"].(int64) == 0 {
++		t.Fatal("missing source diagnostics")
++	}
++}
 diff --git a/module/module-agent/mu300_sms_test.go b/module/module-agent/mu300_sms_test.go
 new file mode 100644
-index 0000000..fac4f68
+index 0000000..34a1c08
 --- /dev/null
 +++ b/module/module-agent/mu300_sms_test.go
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,324 @@
 +package main
 +
 +import (
@@ -6352,6 +7634,7 @@ index 0000000..fac4f68
 +	t.Helper()
 +	dir := t.TempDir()
 +	b := newMU300SMSBackend(dir)
++	b.poolRoot = ""
 +	b.pool = filepath.Join(dir, "pool")
 +	if err := os.Mkdir(b.pool, 0700); err != nil {
 +		t.Fatal(err)
@@ -8381,7 +9664,7 @@ index ed8cb50..5974005 100644
  		return runtimeProfile{
  			Name:           "android-avf",
 diff --git a/module/module-agent/sms.go b/module/module-agent/sms.go
-index 2f0b57c..cfba6f1 100644
+index 2f0b57c..edc73e0 100644
 --- a/module/module-agent/sms.go
 +++ b/module/module-agent/sms.go
 @@ -16,6 +16,7 @@ import (
@@ -8440,16 +9723,23 @@ index 2f0b57c..cfba6f1 100644
  	a.mu.RLock()
  	stored := append([]storedSMS(nil), a.messages...)
  	a.mu.RUnlock()
-@@ -351,7 +372,7 @@ func (a *agent) smsStatus(response http.ResponseWriter, request *http.Request) {
+@@ -350,15 +371,23 @@ func (a *agent) smsStatus(response http.ResponseWriter, request *http.Request) {
+ 	a.mu.RLock()
  	count, lastError := len(a.messages), a.smsError
  	a.mu.RUnlock()
- 	writeJSON(response, http.StatusOK, map[string]any{
+-	writeJSON(response, http.StatusOK, map[string]any{
 -		"auto_cleanup_me": true, "count": count, "last_poll_error": lastError,
+-	})
++	status := map[string]any{
 +		"auto_cleanup_me": a.profile.Name != "mu300-openwrt", "count": count, "last_poll_error": lastError,
- 	})
++	}
++	if a.profile.Name == "mu300-openwrt" {
++		status["backend"] = a.mu300SMSSourceStatus()
++	}
++	writeJSON(response, http.StatusOK, status)
  }
  
-@@ -359,6 +380,10 @@ func (a *agent) smsSend(response http.ResponseWriter, request *http.Request) {
+ func (a *agent) smsSend(response http.ResponseWriter, request *http.Request) {
  	if !requireMethod(response, request, http.MethodPost) {
  		return
  	}
@@ -8460,7 +9750,7 @@ index 2f0b57c..cfba6f1 100644
  	var body struct {
  		Phone   string `json:"phone"`
  		Message string `json:"message"`
-@@ -375,6 +400,9 @@ func (a *agent) smsSend(response http.ResponseWriter, request *http.Request) {
+@@ -375,6 +404,9 @@ func (a *agent) smsSend(response http.ResponseWriter, request *http.Request) {
  }
  
  func (a *agent) sendSMSMessage(rawPhone, message string) (int, error) {
@@ -8470,7 +9760,7 @@ index 2f0b57c..cfba6f1 100644
  	phone := normalizeDialNumber(rawPhone)
  	if phone == "" || len(phone) > 82 || strings.TrimSpace(message) == "" || len([]rune(message)) > 2000 {
  		return 0, errors.New("号码或短信内容无效")
-@@ -444,6 +472,15 @@ func (a *agent) smsAck(response http.ResponseWriter, request *http.Request) {
+@@ -444,6 +476,15 @@ func (a *agent) smsAck(response http.ResponseWriter, request *http.Request) {
  	if !decodeJSON(response, request, &body) {
  		return
  	}
@@ -8486,7 +9776,7 @@ index 2f0b57c..cfba6f1 100644
  	requested := make(map[string]bool, len(body.IDs))
  	for _, id := range body.IDs {
  		if id != "" {
-@@ -485,6 +522,9 @@ func (a *agent) smsAck(response http.ResponseWriter, request *http.Request) {
+@@ -485,6 +526,9 @@ func (a *agent) smsAck(response http.ResponseWriter, request *http.Request) {
  }
  
  func (a *agent) deleteStoredSMS(item storedSMS) error {
@@ -8496,7 +9786,7 @@ index 2f0b57c..cfba6f1 100644
  	if item.Memory == "ANDROID" {
  		return nil
  	}
-@@ -512,6 +552,10 @@ func (a *agent) smsSettings(response http.ResponseWriter, request *http.Request)
+@@ -512,6 +556,10 @@ func (a *agent) smsSettings(response http.ResponseWriter, request *http.Request)
  		writeError(response, http.StatusBadRequest, "缺少 auto_cleanup_me")
  		return
  	}
@@ -8507,7 +9797,7 @@ index 2f0b57c..cfba6f1 100644
  	// 新协议始终在手机确认落盘后清理，旧客户端的开关请求只保留兼容响应。
  	a.mu.Lock()
  	a.smsAuto = true
-@@ -523,6 +567,10 @@ func (a *agent) smsClear(response http.ResponseWriter, request *http.Request) {
+@@ -523,6 +571,10 @@ func (a *agent) smsClear(response http.ResponseWriter, request *http.Request) {
  	if !requireMethod(response, request, http.MethodPost) {
  		return
  	}
@@ -8518,7 +9808,7 @@ index 2f0b57c..cfba6f1 100644
  	if a.profile.AndroidTelecom {
  		a.mu.Lock()
  		totalBefore := len(a.messages)
-@@ -563,6 +611,15 @@ func (a *agent) simIdentity(response http.ResponseWriter, request *http.Request)
+@@ -563,6 +615,15 @@ func (a *agent) simIdentity(response http.ResponseWriter, request *http.Request)
  	if !requireMethod(response, request, http.MethodGet) {
  		return
  	}
@@ -8534,6 +9824,146 @@ index 2f0b57c..cfba6f1 100644
  	result, err := a.at.command("AT+CNUM", 3*time.Second)
  	if err != nil {
  		writeError(response, http.StatusBadGateway, err.Error())
+diff --git a/module/module-agent/testdata/caller-number-cases.json b/module/module-agent/testdata/caller-number-cases.json
+new file mode 100644
+index 0000000..4a93272
+--- /dev/null
++++ b/module/module-agent/testdata/caller-number-cases.json
+@@ -0,0 +1,134 @@
++[
++  [
++    "13800138000",
++    "13800138000"
++  ],
++  [
++    "+8613800138000",
++    "+8613800138000"
++  ],
++  [
++    "008613800138000",
++    "008613800138000"
++  ],
++  [
++    "sip:13800138000@ims.mnc000.mcc460.3gppnetwork.org",
++    "13800138000"
++  ],
++  [
++    "SIPS:%2B86-13800138000@ims.example:5061;user=phone;transport=tls",
++    "+8613800138000"
++  ],
++  [
++    "tel:%2B8613800138000",
++    "+8613800138000"
++  ],
++  [
++    "sip:13800138000;user=phone@ims.example",
++    "13800138000"
++  ],
++  [
++    "13800138000@ims.example",
++    "13800138000"
++  ],
++  [
++    "sip:12345@[2001:db8::1]",
++    "12345"
++  ],
++  [
++    "sip:10086@192.0.2.1:5060",
++    "10086"
++  ],
++  [
++    "tel:10086",
++    "10086"
++  ],
++  [
++    "sip:anonymous@anonymous.invalid",
++    "sip:anonymous@anonymous.invalid"
++  ],
++  [
++    "sip:alice123@ims460.example",
++    "sip:alice123@ims460.example"
++  ],
++  [
++    "tel:123;phone-context=+86",
++    "tel:123;phone-context=+86"
++  ],
++  [
++    "tel:123;ext=9",
++    "tel:123;ext=9"
++  ],
++  [
++    "sip:123;ext=9@ims.example",
++    "sip:123;ext=9@ims.example"
++  ],
++  [
++    "sip:123@ims.example;user=ip",
++    "sip:123@ims.example;user=ip"
++  ],
++  [
++    "sip:123@ims.example;user=phone;user=ip",
++    "sip:123@ims.example;user=phone;user=ip"
++  ],
++  [
++    "sip:12%0A345@ims.example",
++    "sip:12%0A345@ims.example"
++  ],
++  [
++    "sip:12%ZZ345@ims.example",
++    "sip:12%ZZ345@ims.example"
++  ],
++  [
++    "sip:%252B123@ims.example",
++    "sip:%252B123@ims.example"
++  ],
++  [
++    "sip:123@",
++    "sip:123@"
++  ],
++  [
++    "sip:123@@ims.example",
++    "sip:123@@ims.example"
++  ],
++  [
++    "sip:123@ims.example/path",
++    "sip:123@ims.example/path"
++  ],
++  [
++    "sip:123@ims.example?header=x",
++    "sip:123@ims.example?header=x"
++  ],
++  [
++    "sip:123@ims..example",
++    "sip:123@ims..example"
++  ],
++  [
++    "sip:123@-ims.example",
++    "sip:123@-ims.example"
++  ],
++  [
++    "sip:123@[::::]",
++    "sip:123@[::::]"
++  ],
++  [
++    "sip:123@ims.example:0",
++    "sip:123@ims.example:0"
++  ],
++  [
++    "sip:123@ims.example:65536",
++    "sip:123@ims.example:65536"
++  ],
++  [
++    "sip:123:pwd@ims.example",
++    "sip:123:pwd@ims.example"
++  ],
++  [
++    "sip:*123#@ims.example",
++    "sip:*123#@ims.example"
++  ],
++  [
++    "sip:123456789012345678901@ims.example",
++    "sip:123456789012345678901@ims.example"
++  ]
++]
 diff --git a/module/module-agent/voice_backend.go b/module/module-agent/voice_backend.go
 index feb238d..078029f 100644
 --- a/module/module-agent/voice_backend.go

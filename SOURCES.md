@@ -1,11 +1,28 @@
 # Release sources and reproducibility
 
+R27 preservation update (2026-11-24): fixed Agent baseline and exact Go
+vendor sources are retained in `third_party/` with original notices and hash locks.
+The default build no longer needs an upstream Git checkout or module proxy. Larger
+audio/ALSA/DSP/kernel inputs are pinned in `third_party/recovery.lock.json` and
+preserved in a separate dependency vault; they are not embedded in Git. The source
+packager now also creates a versioned recovery companion asset and checksum.
+The recovery companion is published alongside R27. See [offline recovery](docs/OFFLINE_RECOVERY.md).
+
+R27 SMS compatibility contracts (2026-11-24): independently implemented
+reader for `sprd-linux-devs/e5-linux@fb2d3fefaffe95eba9216d874b40bcd2a523701e`
+`openwrt/overlay/usr/libexec/e5-sms-receive` JSON inbox v1; hash-pinned optional
+runtime use of already-installed `sms`, `mu300-at` and `sms-pdu.awk` from
+`dikeckaan/mu300-linux@833616a6c03a7c0245300c5946d98ec98b09bb94`.
+These firmware sources/binaries are not newly vendored or installed by this change.
+Authors retain their notices/licenses. See `docs/SMS_COMPAT_SNAPSHOT.md` for exact
+hashes, source links, supported layouts and untested hardware boundaries.
+
 R26 UI reference:
 `shangjie1998/airsim-f50-openwrt@a9c5c66cd2ce3e386284fc8f394a5845c8547e09`.
 Visual/interaction reference only, independently implemented here; no fork UI
 source or binaries are vendored. See [UI adaptation review](docs/UI_ADAPTATION.md).
 
-Applies to the `v0.1.0-r26` development preview. R26 removes the fixed pairing-count limit for admission,
+Applies to the `v0.1.0-r27` development preview. R27 adds signal/SMS/caller URI compatibility and offline recovery, retaining R26 which removes the fixed pairing-count limit for admission,
 reload and Watch authorization, retaining existing keys and confirmed single-client
 removal. It retains the reorganized LuCI UI,
 independent PCM gains, clock-skew-tolerant pairing-code display, device management,
@@ -14,8 +31,8 @@ terminal confirmation fixes plus SIP caller identity normalization. R23 Tailscal
 and cloud buffer negotiation remain in place. U30 Air candidates passed installation
 and basic checks; new call behavior, gain listening tests, U30L and new kernels are
 not hardware-accepted. Audio remains 8 kHz PCM. Release assets:
-<https://github.com/kai-wu-cortex/airsim-mu300/releases/tag/v0.1.0-r26>.
-Download `airsim-mu300-0.1.0-r26-sources.tar.gz` alongside the binary package.
+<https://github.com/kai-wu-cortex/airsim-mu300/releases/tag/v0.1.0-r27>.
+Download `airsim-mu300-0.1.0-r27-sources.tar.gz` alongside the binary package.
 It contains plugin sources, the patched Agent and its notices, vendored Go sources,
 audio driver/tool sources, ALSA sources, OpenWrt recipes and MU300 kernel build recipes.
 No private signing keys, device state or user messages/audio are included. The source
@@ -43,20 +60,21 @@ with its original checksum manifest because the original repository currently re
 ## Rebuilding the plugin
 
 Follow README's build commands. There is no dependency on an unpublished sibling
-`mu300-audio` checkout. Build from this repository plus the publicly pinned AirSIM
-Git commit; the helper creates an isolated patched source tree. Custom builds must
+`mu300-audio` or AirSIM checkout. Build from this repository's preserved Agent
+baseline; the helper creates an isolated patched source tree. Custom builds must
 use their own signing key and distribute its fingerprint separately. The private
 release key is intentionally absent, so signed APK bytes are not reproducible.
 
 The source bundle's `plugin/` and `AirSIM/` directories can be siblings. The bundled
-AirSIM directory is a patched snapshot, not a Git repository: for the ordinary build
-script clone the pinned upstream repo as documented, or compile the snapshot directly
-with `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build` inside `module/module-agent`.
+AirSIM directory is a patched snapshot, not a Git repository. The ordinary build
+script uses the preserved unmodified baseline in `plugin/third_party/`, or compile
+the patched snapshot directly with `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build`
+inside `module/module-agent`.
 Use the vendored modules to avoid resolving different dependency versions.
 
 ## Rebuilding audio and ALSA dependencies
 
-The R26 APK contains the bridge, Agent, isolated ALSA tools and the hash-pinned
+The R27 APK contains the bridge, Agent, isolated ALSA tools and the hash-pinned
 `airsim-audio-0.1.0-r16.tar.gz` recovery payload: 24 rebuilt modules and static tools.
 The installation workflow selects only its exact kernel/configuration profile,
 backs up replaced files and continues preparation after an arranged boot when
@@ -100,7 +118,7 @@ Run tests, prepare the package, commit reviewed source, then run
 installer and SHA256SUMS. Source archives remain available with the release, not
 merely an offer to provide them later. Preserve every upstream notice and licence.
 Never commit `backups/`, `out/`, an entire workspace, credentials or firmware to
-the source tree. The maintainer requested the fixed DSP backup during R18 development, retained through R26. Its upstream
+the source tree. The maintainer requested the fixed DSP backup during R18 development, retained through R27. Its upstream
 redistribution terms remain undocumented; this release decision is not a grant
 of rights or a declaration that the independent binary is open-source.
 

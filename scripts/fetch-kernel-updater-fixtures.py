@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fetch byte-pinned public test sources only; never invoke an updater."""
 import hashlib
+import os
 from pathlib import Path
 import urllib.request
 
@@ -14,6 +15,8 @@ for name, commit, digest in [
     if p.exists() and hashlib.sha256(p.read_bytes()).hexdigest() == digest:
         print(name + ': pinned cache verified')
         continue
+    if os.environ.get('AIRSIM_OFFLINE') == '1':
+        raise SystemExit(name + ': offline fixture missing; restore dependency vault')
     url = f'https://raw.githubusercontent.com/dikeckaan/mu300-linux/{commit}/rootfs/overlay/opt/mu300/bin/mu300-update'
     with urllib.request.urlopen(url, timeout=30) as response:
         content = response.read(1024 * 1024 + 1)

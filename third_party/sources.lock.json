@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "agent_commit": "cc2ade3124ac34bec7d8c441f4b66a57a6dfec62",
+  "archives": {
+    "agent-base": {
+      "file": "airsim-agent-base.tar.gz",
+      "sha256": "b19b725dbc414bcaae68fedc0ad08baccfb99c04a8d51a1bfb2dcf595e3eced5",
+      "source": "https://github.com/kai-wu-cortex/AirSIM/tree/cc2ade3124ac34bec7d8c441f4b66a57a6dfec62"
+    },
+    "plugin-vendor": {
+      "file": "plugin-go-vendor.tar.gz",
+      "sha256": "a6828060c7a2be6bedfeda6184f19d61b03c82921a735f0bf838c2811ac44f03",
+      "go_mod_sha256": "15bad27af36af828485133c4079e3f7a2ed9f6e47f8e80c1b1d61bfb105bfe28",
+      "go_sum_sha256": "1c0cc17e1adcf93e4a2bb10a7bd0d96a5837dd3cc284c98852dc23c5347bb1d1",
+      "source": "Exact go.mod/go.sum dependencies; licenses retained in vendor"
+    },
+    "agent-vendor": {
+      "file": "agent-go-vendor.tar.gz",
+      "sha256": "021cd6dd203c06a51c919db459513f4b4febfe1aba0202bd46205b41b813d8c9",
+      "go_mod_sha256": "c7a4d53b6c00409165a624e5d8c8f7a3951f1c7e246224b55426e91d0e49461e",
+      "go_sum_sha256": "ced862dc8fa7f801947e01ce44e441b674044f56582f90586d19c48e2120fb57",
+      "source": "Exact go.mod/go.sum dependencies; licenses retained in vendor"
+    }
+  }
+}
