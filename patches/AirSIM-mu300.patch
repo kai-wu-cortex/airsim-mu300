@@ -188,10 +188,17 @@ index 2a9bfce..9fe50d4 100644
  		commandID, err := randomUUID()
  		if err != nil {
 diff --git a/module/module-agent/cellular_recovery.go b/module/module-agent/cellular_recovery.go
-index e2142ad..0ae7edf 100644
+index e2142ad..67920ad 100644
 --- a/module/module-agent/cellular_recovery.go
 +++ b/module/module-agent/cellular_recovery.go
-@@ -214,7 +214,9 @@ func (a *agent) cloudHeartbeatLoop() {
+@@ -208,15 +208,19 @@ func (a *agent) cloudHeartbeatLoop() {
+ 		registration := a.modem.RegistrationText
+ 		recovery := a.modem.RecoveryState
+ 		signal := a.modem.SignalDBM
++		signalObservedAtMS := a.modem.SignalObservedAtMS
+ 		a.mu.RUnlock()
+ 		if state == "" {
+ 			state = "unregistered"
  		}
  		atHealth := a.at.healthSnapshot()
  		err := a.push.sendHeartbeat(agentHeartbeatSnapshot{
@@ -201,7 +208,10 @@ index e2142ad..0ae7edf 100644
 +			ATOK:        atHealth.ConsecutiveFailures < 3, CellularState: state,
  			CellularRegistration: registration, CellularRecovery: recovery,
  			ECMCarrier: readDebugFile(usbCarrierPath), SignalDBM: signal,
++			SignalObservedAtMS: signalObservedAtMS,
  		})
+ 		if err != nil {
+ 			a.debug.add("cloud", "heartbeat", "Agent 云端心跳失败", err.Error(), nil)
 diff --git a/module/module-agent/cloud_audio_policy.go b/module/module-agent/cloud_audio_policy.go
 new file mode 100644
 index 0000000..d2b2351
@@ -551,7 +561,7 @@ index 0000000..9372fcc
 +	}
 +}
 diff --git a/module/module-agent/cloud_call.go b/module/module-agent/cloud_call.go
-index 0357f2d..8d8a437 100644
+index 0357f2d..cbb0b28 100644
 --- a/module/module-agent/cloud_call.go
 +++ b/module/module-agent/cloud_call.go
 @@ -22,6 +22,8 @@ import (
@@ -563,7 +573,7 @@ index 0357f2d..8d8a437 100644
  	CallID         string
  	CallUUID       string
  	Generation     uint64
-@@ -47,14 +49,20 @@ func cloudMediaURL(relayURL, callUUID, callSecret string) (string, error) {
+@@ -47,14 +49,41 @@ func cloudMediaURL(relayURL, callUUID, callSecret string) (string, error) {
  }
  
  type cloudCallAction struct {
@@ -589,10 +599,31 @@ index 0357f2d..8d8a437 100644
 +	TraceID              string          `json:"trace_id,omitempty"`
 +	Owner                string          `json:"owner"`
 +	MediaProtocol        string          `json:"media_protocol,omitempty"`
++}
++
++// Relay broadcasts peer/ownership notifications on the same socket as commands.
++// Only recognize the exact status envelope: additional fields must still pass
++// command identity validation, never silently bypass it as a notification.
++func isCloudRelayNotification(data []byte) bool {
++	var value map[string]string
++	if err := json.Unmarshal(data, &value); err != nil || len(value) != 2 {
++		return false
++	}
++	switch value["event"] {
++	case "peer_connected", "peer_disconnected", "owner_claimed":
++	default:
++		return false
++	}
++	switch value["role"] {
++	case "agent", "iphone", "watch":
++		return true
++	default:
++		return false
++	}
  }
  
  func decodeCloudCallAction(data []byte, expectedCallID string) (cloudCallAction, error) {
-@@ -75,6 +83,13 @@ func decodeCloudCallActionForDescriptor(data []byte, descriptor cloudCallDescrip
+@@ -75,6 +104,13 @@ func decodeCloudCallActionForDescriptor(data []byte, descriptor cloudCallDescrip
  		!strings.EqualFold(value.CallUUID, descriptor.CallUUID) {
  		return cloudCallAction{}, fmt.Errorf("公网控制的 call_uuid 不属于当前通话")
  	}
@@ -606,7 +637,7 @@ index 0357f2d..8d8a437 100644
  	expectedGeneration := descriptor.Generation
  	if expectedGeneration == 0 {
  		expectedGeneration = 1
-@@ -173,6 +188,13 @@ func (a *agent) startCloudCall(descriptor cloudCallDescriptor) {
+@@ -173,6 +209,13 @@ func (a *agent) startCloudCall(descriptor cloudCallDescriptor) {
  		descriptor.StartedAt = time.Now()
  	}
  	a.cloudCallMu.Lock()
@@ -620,7 +651,7 @@ index 0357f2d..8d8a437 100644
  	if a.cloudCallCancel != nil {
  		a.cloudCallCancel()
  	}
-@@ -210,6 +232,9 @@ func (a *agent) retireCloudCallDescriptor(descriptor cloudCallDescriptor) {
+@@ -210,6 +253,9 @@ func (a *agent) retireCloudCallDescriptor(descriptor cloudCallDescriptor) {
  }
  
  func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor) {
@@ -630,7 +661,7 @@ index 0357f2d..8d8a437 100644
  	descriptor.MediaTransport = resolveCloudMediaTransport(
  		descriptor.MediaTransport,
  		[]string{cloudMediaTransportLegacyPCM},
-@@ -258,6 +283,9 @@ func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor
+@@ -258,6 +304,9 @@ func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor
  }
  
  func (a *agent) cloudCallDescriptorAlive(descriptor cloudCallDescriptor) bool {
@@ -640,7 +671,7 @@ index 0357f2d..8d8a437 100644
  	if descriptor.Direction != "outgoing" {
  		return a.cloudCallStillExists(descriptor.CallID)
  	}
-@@ -295,6 +323,14 @@ func establishCloudPCMConnection(
+@@ -295,6 +344,14 @@ func establishCloudPCMConnection(
  func (a *agent) cloudCallStillExists(callID string) bool {
  	a.mu.RLock()
  	defer a.mu.RUnlock()
@@ -655,7 +686,7 @@ index 0357f2d..8d8a437 100644
  	return a.calls.Active != nil && a.calls.Active.ID == callID
  }
  
-@@ -304,6 +340,8 @@ type cloudPCMBridge struct {
+@@ -304,6 +361,8 @@ type cloudPCMBridge struct {
  	health           *cloudMediaHealthTracker
  	mediaProtocol    string
  	downlinkSequence uint32
@@ -664,7 +695,7 @@ index 0357f2d..8d8a437 100644
  	uplinkBuffer     cloudPCMSpeechBuffer
  	uplinkFramer     cloudPCMFramer
  }
-@@ -383,17 +421,25 @@ func (bridge *cloudPCMBridge) frameDownlink(payload []byte, timestamp time.Time)
+@@ -383,17 +442,25 @@ func (bridge *cloudPCMBridge) frameDownlink(payload []byte, timestamp time.Time)
  
  func (bridge *cloudPCMBridge) set(connection net.Conn) {
  	bridge.mu.Lock()
@@ -691,7 +722,7 @@ index 0357f2d..8d8a437 100644
  	if bridge.conn != nil {
  		_ = bridge.conn.Close()
  	}
-@@ -404,6 +450,8 @@ func (bridge *cloudPCMBridge) close() {
+@@ -404,6 +471,8 @@ func (bridge *cloudPCMBridge) close() {
  func (bridge *cloudPCMBridge) clear(connection net.Conn) {
  	bridge.mu.Lock()
  	if bridge.conn == connection {
@@ -700,7 +731,7 @@ index 0357f2d..8d8a437 100644
  		_ = bridge.conn.Close()
  		bridge.conn = nil
  	}
-@@ -416,6 +464,11 @@ func (a *agent) serveCloudCall(
+@@ -416,6 +485,11 @@ func (a *agent) serveCloudCall(
  	descriptor cloudCallDescriptor,
  	health *cloudMediaHealthTracker,
  ) bool {
@@ -712,7 +743,7 @@ index 0357f2d..8d8a437 100644
  	bridge := &cloudPCMBridge{health: health}
  	defer bridge.close()
  	playbackContext, stopPlayback := context.WithCancel(ctx)
-@@ -443,6 +496,10 @@ func (a *agent) serveCloudCall(
+@@ -443,6 +517,10 @@ func (a *agent) serveCloudCall(
  					a.mu.RLock()
  					alive = a.calls.Active != nil && a.calls.Active.Direction == "outgoing"
  					a.mu.RUnlock()
@@ -723,7 +754,17 @@ index 0357f2d..8d8a437 100644
  					seenOutgoing = seenOutgoing || alive
  					if !seenOutgoing && time.Since(missingSince) < 20*time.Second {
  						continue
-@@ -483,6 +540,10 @@ func (a *agent) serveCloudCall(
+@@ -473,6 +551,9 @@ func (a *agent) serveCloudCall(
+ 				_ = bridge.write(payload)
+ 			}
+ 		case cloudOpcodeText:
++			if isCloudRelayNotification(payload) {
++				continue
++			}
+ 			control, err := decodeCloudCallActionForDescriptor(payload, descriptor)
+ 			if err != nil {
+ 				_ = socket.WriteText(cloudStatus("action_error", err.Error()))
+@@ -483,6 +564,10 @@ func (a *agent) serveCloudCall(
  			a.debug.add("cloud-call-control", "received", "收到公网通话控制", "", fields)
  			switch control.Action {
  			case "answer":
@@ -734,7 +775,7 @@ index 0357f2d..8d8a437 100644
  				startMedia := false
  				if !mediaStarted {
  					bridge.setMediaProtocol(control.MediaProtocol)
-@@ -501,19 +562,27 @@ func (a *agent) serveCloudCall(
+@@ -501,19 +586,27 @@ func (a *agent) serveCloudCall(
  						a.voice.mu.Unlock()
  					}
  				}
@@ -764,7 +805,7 @@ index 0357f2d..8d8a437 100644
  							a.debug.add("cloud-call", "error", "同步接听所有权失败", err.Error(), map[string]string{"call_id": descriptor.CallID, "owner": control.Owner})
  						}
  					}()
-@@ -527,9 +596,22 @@ func (a *agent) serveCloudCall(
+@@ -527,9 +620,22 @@ func (a *agent) serveCloudCall(
  				}
  				_ = socket.WriteText(cloudStatusForAction("rejected", "", descriptor, control))
  				a.debug.add("cloud-call-control", "completed", "公网拒接命令已执行", "", fields)
@@ -788,7 +829,7 @@ index 0357f2d..8d8a437 100644
  				if a.profile.AndroidTelecom {
  					a.debug.add("cloud-call-control", "modem_executing", "执行挂断命令", a.callControlBackendDescription(), fields)
  					if err := a.executeIncomingCloudCallAction(control, "end"); err != nil {
-@@ -539,7 +621,9 @@ func (a *agent) serveCloudCall(
+@@ -539,7 +645,9 @@ func (a *agent) serveCloudCall(
  					}
  					_ = socket.WriteText(cloudStatusForAction("ended", "", descriptor, control))
  					a.debug.add("cloud-call-control", "completed", "公网挂断已由 Android Telecom 接受", "", fields)
@@ -799,7 +840,7 @@ index 0357f2d..8d8a437 100644
  					return true
  				}
  				a.debug.add("cloud-call-control", "modem_executing", "执行挂断并确认基带状态", "ATH（失败时回退 AT+CHUP）→ AT+CLCC", fields)
-@@ -552,7 +636,9 @@ func (a *agent) serveCloudCall(
+@@ -552,7 +660,9 @@ func (a *agent) serveCloudCall(
  				_ = socket.WriteText(cloudStatusForAction("ended", "", descriptor, control))
  				fields["clcc_attempts"] = fmt.Sprintf("%d", attempts)
  				a.debug.add("cloud-call-control", "completed", "公网挂断已由 CLCC 确认", lastCLCC, fields)
@@ -810,7 +851,7 @@ index 0357f2d..8d8a437 100644
  				return true
  			}
  		}
-@@ -568,6 +654,15 @@ func (a *agent) callControlBackendDescription() string {
+@@ -568,6 +678,15 @@ func (a *agent) callControlBackendDescription() string {
  }
  
  func (a *agent) executeIncomingCloudCallAction(control cloudCallAction, action string) error {
@@ -826,7 +867,7 @@ index 0357f2d..8d8a437 100644
  	if !a.profile.AndroidTelecom {
  		switch action {
  		case "answer":
-@@ -775,6 +870,12 @@ func (a *agent) connectCloudPCM(
+@@ -775,6 +894,12 @@ func (a *agent) connectCloudPCM(
  			_ = socket.WriteText(cloudStatus("action_error", "模块 PCM 启动超时"))
  			return
  		}
@@ -839,7 +880,7 @@ index 0357f2d..8d8a437 100644
  		// 只等待 7580 开始监听，随后立即建立客户端连接。完整 ready 状态必须
  		// 在 AIRSIMPCM1/AIRSIMREADY 握手和双向线程启动后才成立。
  		connection, err := establishCloudPCMConnection(
-@@ -823,7 +924,11 @@ func (a *agent) connectCloudPCM(
+@@ -823,7 +948,11 @@ func (a *agent) connectCloudPCM(
  			cloudPCMMilestoneListening, "",
  			cloudPCMTransmissionStatsFromHealth(health.snapshot()),
  		))
@@ -852,7 +893,7 @@ index 0357f2d..8d8a437 100644
  			a.debug.add("voice-backend", "handshake_failed", "三星 PCM 握手失败", err.Error(), map[string]string{
  				"backend": string(a.voiceBackend.kind),
  			})
-@@ -833,6 +938,14 @@ func (a *agent) connectCloudPCM(
+@@ -833,6 +962,14 @@ func (a *agent) connectCloudPCM(
  			}
  			continue
  		}
@@ -867,7 +908,7 @@ index 0357f2d..8d8a437 100644
  		a.markVoiceBackendHandshakeReady()
  		a.debug.add("voice-backend", "ready", "三星 PCM 媒体会话已建立", "", map[string]string{
  			"backend": string(a.voiceBackend.kind),
-@@ -952,7 +1065,12 @@ func (a *agent) startOutgoingCloudPCM(
+@@ -952,7 +1089,12 @@ func (a *agent) startOutgoingCloudPCM(
  	bridge *cloudPCMBridge,
  	descriptor cloudCallDescriptor,
  	health *cloudMediaHealthTracker,
@@ -880,7 +921,7 @@ index 0357f2d..8d8a437 100644
  	deadline := time.Now().Add(3 * time.Minute)
  	ticker := time.NewTicker(250 * time.Millisecond)
  	defer ticker.Stop()
-@@ -1057,7 +1175,11 @@ func (framer *cloudPCMFramer) append(chunk []byte) [][]byte {
+@@ -1057,7 +1199,11 @@ func (framer *cloudPCMFramer) append(chunk []byte) [][]byte {
  func (framer *cloudPCMFramer) buffered() int { return len(framer.pending) }
  
  func cloudPCMHandshake(connection net.Conn) error {
@@ -893,7 +934,7 @@ index 0357f2d..8d8a437 100644
  	if _, err := connection.Write([]byte("AIRSIMPCM1\n")); err != nil {
  		return err
  	}
-@@ -1180,6 +1302,8 @@ func (socket *cloudWebSocket) writeMessage(opcode byte, payload []byte) error {
+@@ -1180,6 +1326,8 @@ func (socket *cloudWebSocket) writeMessage(opcode byte, payload []byte) error {
  	}
  	socket.writeMu.Lock()
  	defer socket.writeMu.Unlock()
@@ -1080,6 +1121,51 @@ index 91cd95f..5d1cecc 100644
 +		b.dropped++
 +	}
 +}
+diff --git a/module/module-agent/cloud_relay_notification_test.go b/module/module-agent/cloud_relay_notification_test.go
+new file mode 100644
+index 0000000..e29ea58
+--- /dev/null
++++ b/module/module-agent/cloud_relay_notification_test.go
+@@ -0,0 +1,39 @@
++package main
++
++import "testing"
++
++func TestCloudRelayNotificationsAreNotCallCommands(t *testing.T) {
++	for _, event := range []string{"peer_connected", "owner_claimed", "peer_disconnected"} {
++		for _, role := range []string{"agent", "iphone", "watch"} {
++			if !isCloudRelayNotification([]byte(`{"event":"` + event + `","role":"` + role + `"}`)) {
++				t.Fatalf("Relay notification rejected: %s/%s", event, role)
++			}
++		}
++	}
++}
++
++func TestCloudRelayNotificationCannotHideInvalidControl(t *testing.T) {
++	for _, payload := range []string{
++		`null`, `[]`, `{`,
++		`{"event":"peer_connected"}`,
++		`{"event":"unknown","role":"iphone"}`,
++		`{"event":"peer_connected","role":"unknown"}`,
++		`{"event":"peer_connected","role":42}`,
++		`{"event":"peer_connected","role":"iphone","action":"answer","call_id":"old"}`,
++		`{"event":"owner_claimed","role":"iphone","call_id":"old"}`,
++	} {
++		if isCloudRelayNotification([]byte(payload)) {
++			t.Fatalf("Invalid command was hidden as status: %s", payload)
++		}
++		if _, err := decodeCloudCallAction([]byte(payload), "current"); err == nil {
++			t.Fatalf("Invalid command passed identity validation: %s", payload)
++		}
++	}
++	payload := []byte(`{"event":"owner_claimed","role":"iphone","action":"answer","call_id":"current","owner":"iphone"}`)
++	if isCloudRelayNotification(payload) {
++		t.Fatal("Command must not be swallowed even if it contains a known event")
++	}
++	if action, err := decodeCloudCallAction(payload, "current"); err != nil || action.Action != "answer" {
++		t.Fatalf("Valid bound command must still execute: %v", err)
++	}
++}
 diff --git a/module/module-agent/main.go b/module/module-agent/main.go
 index 338c9a6..f9e5034 100644
 --- a/module/module-agent/main.go
@@ -1255,10 +1341,10 @@ index 338c9a6..f9e5034 100644
  
  func (a *agent) platform(response http.ResponseWriter, request *http.Request) {
 diff --git a/module/module-agent/modem.go b/module/module-agent/modem.go
-index b2ff8b6..414c855 100644
+index b2ff8b6..d404e33 100644
 --- a/module/module-agent/modem.go
 +++ b/module/module-agent/modem.go
-@@ -9,20 +9,25 @@ import (
+@@ -9,20 +9,26 @@ import (
  
  // modemStatus 只暴露 iPad 客户端需要的稳定字段，原始 AT 响应不会写入日志或网络。
  type modemStatus struct {
@@ -1283,6 +1369,7 @@ index b2ff8b6..414c855 100644
 +	Operator             string `json:"operator,omitempty"`
 +	SIMInserted          bool   `json:"sim_inserted"`
 +	SignalDBM            *int   `json:"signal_dbm"`
++	SignalObservedAtMS   int64  `json:"signal_observed_at_ms,omitempty"`
 +	SignalSource         string `json:"signal_source,omitempty"`
 +	SignalUpdatedAt      string `json:"signal_updated_at,omitempty"`
 +	NetworkMode          string `json:"network_mode,omitempty"`
@@ -1298,12 +1385,47 @@ index b2ff8b6..414c855 100644
  }
  
  var (
+@@ -91,6 +97,7 @@ func (a *agent) refreshModemDynamic() {
+ 	cpin, cpinOK := run("AT+CPIN?")
+ 	operator, operatorOK := run("AT+COPS?")
+ 	signal, signalOK := run("AT+CSQ")
++	signalObservedAt := time.Now()
+ 	network, networkOK := run("AT+QNWINFO")
+ 	registrationResponse, registrationOK := run("AT+CEREG?")
+ 	registration := parseRegistration(registrationResponse)
+@@ -107,7 +114,7 @@ func (a *agent) refreshModemDynamic() {
+ 		a.modem.Operator = normalizeOperator(parseOperator(operator))
+ 	}
+ 	if signalOK {
+-		a.modem.SignalDBM = parseSignalDBM(signal)
++		a.modem.recordSignal(signal, signalObservedAt)
+ 	}
+ 	if networkOK {
+ 		a.modem.NetworkMode, a.modem.RadioBand = parseNetworkInfo(network)
+@@ -126,6 +133,17 @@ func (a *agent) refreshModemDynamic() {
+ 	}
+ }
+ 
++// recordSignal timestamps a successful CSQ observation, not a later status or
++// heartbeat refresh. Unknown/malformed CSQ clears both fields. Callers must not
++// invoke this on command failure: the previous sample must expire naturally.
++func (m *modemStatus) recordSignal(response string, observedAt time.Time) {
++	m.SignalDBM = parseSignalDBM(response)
++	m.SignalObservedAtMS = 0
++	if m.SignalDBM != nil {
++		m.SignalObservedAtMS = observedAt.UnixMilli()
++	}
++}
++
+ func parseFirmware(response string) string {
+ 	var useful []string
+ 	for _, line := range strings.Split(response, "\n") {
 diff --git a/module/module-agent/mu300.go b/module/module-agent/mu300.go
 new file mode 100644
-index 0000000..d09522b
+index 0000000..74b762e
 --- /dev/null
 +++ b/module/module-agent/mu300.go
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,365 @@
 +package main
 +
 +import (
@@ -1594,6 +1716,7 @@ index 0000000..d09522b
 +		return
 +	}
 +	csq, csqErr := a.mu300AT("AT+CSQ", 3*time.Second)
++	csqObservedAt := time.Now()
 +	if !a.mu300MetadataIdle() {
 +		return
 +	}
@@ -1634,10 +1757,20 @@ index 0000000..d09522b
 +	if copsErr == nil {
 +		a.modem.Operator = normalizeOperator(parseOperator(cops))
 +	}
-+	// Clear stale values when both sources fail. RSSI and RSRP remain identified.
-+	a.modem.SignalDBM = signal
-+	a.modem.SignalSource = source
-+	a.modem.SignalUpdatedAt = time.Now().UTC().Format(time.RFC3339)
++	// A failed query is not a new observation: retain the previous value and
++	// time so cloud clients can expire it. A successful unknown CSQ clears it
++	// unless an independent vendor RSRP is available for the legacy status UI.
++	if csqErr == nil || signal != nil {
++		a.modem.SignalDBM = signal
++		a.modem.SignalSource = source
++		a.modem.SignalObservedAtMS = 0
++		if source == "csq_rssi" {
++			a.modem.recordSignal(csq, csqObservedAt)
++		}
++		// This legacy field is refresh metadata, not a cloud sample timestamp.
++		// Vendor RPCs may return cached RSRP; never label that as fresh CSQ.
++		a.modem.SignalUpdatedAt = time.Now().UTC().Format(time.RFC3339)
++	}
 +}
 +
 +func (a *agent) mu300RefreshNumber() (string, error) {
@@ -2018,10 +2151,10 @@ index 0000000..8d5d6b0
 +}
 diff --git a/module/module-agent/mu300_caller_identity.go b/module/module-agent/mu300_caller_identity.go
 new file mode 100644
-index 0000000..e37b3c8
+index 0000000..5b1ff6c
 --- /dev/null
 +++ b/module/module-agent/mu300_caller_identity.go
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,189 @@
 +package main
 +
 +import (
@@ -2184,12 +2317,39 @@ index 0000000..e37b3c8
 +	// results as equal would also merge genuinely different callers.
 +	return "opaque:" + value
 +}
++
++// Used only to compare the caller of the same live CLCC slot. The modem may
++// add an explicit +86 prefix after accepting an incoming mainland mobile call.
++// Do not change display/dial strings or equate arbitrary suffixes, 00 prefixes,
++// short codes, other countries, extensions or opaque addresses.
++func mu300SameCallerIdentity(left, right string) bool {
++	if mu300CallerIdentity(left) == mu300CallerIdentity(right) {
++		return true
++	}
++	national := func(raw string) string {
++		value := mu300CallerNumber(raw)
++		if strings.HasPrefix(value, "+86") {
++			value = strings.TrimPrefix(value, "+86")
++		}
++		if len(value) != 11 || value[0] != '1' || value[1] < '3' || value[1] > '9' {
++			return ""
++		}
++		for _, c := range value {
++			if c < '0' || c > '9' {
++				return ""
++			}
++		}
++		return value
++	}
++	a, b := national(left), national(right)
++	return a != "" && a == b
++}
 diff --git a/module/module-agent/mu300_caller_identity_test.go b/module/module-agent/mu300_caller_identity_test.go
 new file mode 100644
-index 0000000..54c5f9e
+index 0000000..ab780d5
 --- /dev/null
 +++ b/module/module-agent/mu300_caller_identity_test.go
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,277 @@
 +package main
 +
 +import (
@@ -2427,9 +2587,49 @@ index 0000000..54c5f9e
 +		}
 +	}
 +}
++
++func TestMU300NationalMobileToTELAfterAnswerKeepsCloudSession(t *testing.T) {
++	for _, pair := range [][2]string{
++		{"15550001111", "tel:+8615550001111"},
++		{"tel:+8615550001111", "15550001111"},
++		{"15550001111", "sip:%2B8615550001111@ims.example;user=phone"},
++	} {
++		a := testMU300Calls(t, nil)
++		now := time.Now()
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: pair[0]}}, now, true)
++		id := a.calls.Active.ID
++		// The actual device first confirms active with the old spelling, then
++		// reports TEL +86 on its next poll. No native termination happened.
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: pair[0]}}, now.Add(time.Second), true)
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: pair[1]}}, now.Add(2*time.Second), true)
++		if a.calls.Active.ID != id || len(a.calls.History) != 0 || !a.cloudCallStillExists(id) {
++			t.Fatal("equivalent caller spelling ended the accepted cloud call")
++		}
++		a.mu300ApplyCallPollWithEnd(nil, now.Add(3*time.Second), true, id)
++		if a.cloudCallStillExists(id) || len(a.calls.History) != 1 || a.calls.History[0].ID != id {
++			t.Fatal("real targeted termination must still end exactly the original call")
++		}
++	}
++}
++
++func TestMU300DifferentCountryOrSubscriberStillReplacesCall(t *testing.T) {
++	for _, other := range []string{
++		"tel:+8615550002222", "tel:+115550001111", "tel:+8615550001111;ext=1",
++		"tel:008615550001111", "tel:8615550001111", "tel:+86155500011110",
++	} {
++		a := testMU300Calls(t, nil)
++		now := time.Now()
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: "15550001111"}}, now, true)
++		id := a.calls.Active.ID
++		a.mu300ApplyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: other}}, now.Add(time.Second), true)
++		if a.calls.Active.ID == id || len(a.calls.History) != 1 || a.cloudCallStillExists(id) {
++			t.Fatal("different or qualified caller must not inherit old cloud identity")
++		}
++	}
++}
 diff --git a/module/module-agent/mu300_calls.go b/module/module-agent/mu300_calls.go
 new file mode 100644
-index 0000000..71ed668
+index 0000000..20f1962
 --- /dev/null
 +++ b/module/module-agent/mu300_calls.go
 @@ -0,0 +1,449 @@
@@ -2496,7 +2696,7 @@ index 0000000..71ed668
 +		// A connected slot returning to setup, or changing direction, is a
 +		// replacement even if an idle poll was missed. Never reuse its UUID.
 +		replaced := exists && (old.Direction != p.Direction ||
-+			(old.Number != "" && p.Number != "" && mu300CallerIdentity(old.Number) != mu300CallerIdentity(p.Number)) ||
++			(old.Number != "" && p.Number != "" && !mu300SameCallerIdentity(old.Number, p.Number)) ||
 +			((old.State == "active" || old.State == "held") &&
 +				(p.State == "incoming" || p.State == "waiting" || p.State == "dialing" || p.State == "alerting")))
 +		if !exists || replaced {
@@ -3920,10 +4120,10 @@ index 0000000..8c260fe
 +}
 diff --git a/module/module-agent/mu300_compat_test.go b/module/module-agent/mu300_compat_test.go
 new file mode 100644
-index 0000000..9e76d64
+index 0000000..febee60
 --- /dev/null
 +++ b/module/module-agent/mu300_compat_test.go
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,154 @@
 +package main
 +
 +import (
@@ -4069,10 +4269,11 @@ index 0000000..9e76d64
 +	if calls != 1 || a.modem.SignalDBM == nil || *a.modem.SignalDBM != -96 || a.modem.SignalSource != "vendor_rsrp" {
 +		t.Fatal(a.modem)
 +	}
++	oldRefresh := a.modem.SignalUpdatedAt
 +	fail = true
 +	a.mu300RefreshModemWithSignal(func() *int { return nil })
-+	if a.modem.SignalDBM != nil || a.modem.SignalSource != "" || a.modem.Operator != "" || a.modem.SignalUpdatedAt == "" {
-+		t.Fatal("stale metadata retained", a.modem)
++	if a.modem.SignalDBM == nil || *a.modem.SignalDBM != -96 || a.modem.SignalSource != "vendor_rsrp" || a.modem.Operator != "" || a.modem.SignalUpdatedAt != oldRefresh || a.modem.SignalObservedAtMS != 0 {
++		t.Fatal("failed sample changed prior observation", a.modem)
 +	}
 +	a.applyCallPoll(parseCLCC(mu300TestActive+"OK"), time.Now())
 +	a.mu300RefreshModemWithSignal(func() *int { t.Fatal("metadata polled during call"); return nil })
@@ -5763,6 +5964,166 @@ index 0000000..9a9a067
 +		return &dbm
 +	}
 +	return nil
++}
+diff --git a/module/module-agent/mu300_signal_observation_test.go b/module/module-agent/mu300_signal_observation_test.go
+new file mode 100644
+index 0000000..f87e53f
+--- /dev/null
++++ b/module/module-agent/mu300_signal_observation_test.go
+@@ -0,0 +1,154 @@
++package main
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestSignalObservationUnknownClearsValueAndTime(t *testing.T) {
++	for _, response := range []string{"+CSQ: 99,99\r\nOK", "+CSQ: 32,99\r\nOK", "OK", "+CSQ: invalid\r\nOK"} {
++		var status modemStatus
++		observed := time.UnixMilli(1795660000000)
++		status.recordSignal("+CSQ: 29,99\r\nOK", observed)
++		if status.SignalDBM == nil || *status.SignalDBM != -55 || status.SignalObservedAtMS != observed.UnixMilli() {
++			t.Fatal("valid observation missing")
++		}
++		status.recordSignal(response, observed.Add(time.Minute))
++		if status.SignalDBM != nil || status.SignalObservedAtMS != 0 {
++			t.Fatal("unknown signal kept observation")
++		}
++	}
++}
++
++func TestMU300SignalObservationLifecycleAndHeartbeat(t *testing.T) {
++	response := "+CSQ: 20,99\r\nOK"
++	var signalErr error
++	var afterCSQ time.Time
++	a := testMU300Calls(t, func(cmd string, _ time.Duration) (string, error) {
++		switch cmd {
++		case "AT+CSQ":
++			return response, signalErr
++		case "AT+COPS?":
++			// A later metadata operation must not become the signal sample time.
++			afterCSQ = time.Now()
++			time.Sleep(5 * time.Millisecond)
++			return "OK", nil
++		case "AT+CPIN?":
++			return "+CPIN: READY\r\nOK", nil
++		case "AT+CEREG?":
++			return "+CEREG: 0,1\r\nOK", nil
++		case "AT+CNUM":
++			return "OK", nil
++		default:
++			t.Fatalf("unexpected operation %q", cmd)
++			return "", nil
++		}
++	})
++	vendor := func() *int { return nil }
++	start := time.Now()
++	a.mu300RefreshModemWithSignal(vendor)
++	observed := a.modem.SignalObservedAtMS
++	if a.modem.SignalDBM == nil || *a.modem.SignalDBM != -73 || observed < start.UnixMilli() || observed > afterCSQ.UnixMilli() {
++		t.Fatal("timestamp is not actual CSQ observation")
++	}
++	// Age the sample beyond the client's 300-second TTL without waiting. Neither
++	// failed polling nor repeated heartbeats may refresh this timestamp.
++	old := time.Now().Add(-301 * time.Second).UnixMilli()
++	a.modem.SignalObservedAtMS = old
++	refresh := a.modem.SignalUpdatedAt
++	signalErr = errors.New("synthetic timeout")
++	a.mu300RefreshModemWithSignal(vendor)
++	if a.modem.SignalObservedAtMS != old || a.modem.SignalDBM == nil || *a.modem.SignalDBM != -73 || a.modem.SignalUpdatedAt != refresh {
++		t.Fatal("failed poll renewed/cleared previous sample")
++	}
++	received := make(chan map[string]json.RawMessage, 8)
++	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var body map[string]json.RawMessage
++		if r.URL.Path != "/v1/events/heartbeat" || json.NewDecoder(r.Body).Decode(&body) != nil {
++			t.Error("invalid heartbeat")
++			w.WriteHeader(400)
++			return
++		}
++		received <- body
++		w.WriteHeader(http.StatusAccepted)
++	}))
++	defer server.Close()
++	manager := newPushManager(filepath.Join(t.TempDir(), "push.json"))
++	manager.client = server.Client()
++	if err := manager.store(testPushRegistration(server.URL)); err != nil {
++		t.Fatal(err)
++	}
++	send := func() map[string]json.RawMessage {
++		t.Helper()
++		if err := manager.sendHeartbeat(agentHeartbeatSnapshot{CellularState: "registered", SignalDBM: a.modem.SignalDBM, SignalObservedAtMS: a.modem.SignalObservedAtMS}); err != nil {
++			t.Fatal(err)
++		}
++		select {
++		case body := <-received:
++			return body
++		default:
++			t.Fatal("no heartbeat")
++			return nil
++		}
++	}
++	for i := 0; i < 2; i++ {
++		body := send()
++		var at int64
++		var dbm int
++		if json.Unmarshal(body["signal_observed_at_ms"], &at) != nil || at != old || json.Unmarshal(body["signal_dbm"], &dbm) != nil || dbm != -73 {
++			t.Fatal("heartbeat lost or renewed old sample")
++		}
++		if _, ok := body["sim_slots"]; ok {
++			t.Fatal("single signal fabricated SIM slots")
++		}
++	}
++	signalErr = nil
++	response = "+CSQ: 99,99\r\nOK"
++	a.mu300RefreshModemWithSignal(vendor)
++	if a.modem.SignalDBM != nil || a.modem.SignalObservedAtMS != 0 {
++		t.Fatal("unknown CSQ did not clear sample")
++	}
++	body := send()
++	if _, ok := body["signal_dbm"]; ok {
++		t.Fatal("unknown signal serialized")
++	}
++	if _, ok := body["signal_observed_at_ms"]; ok {
++		t.Fatal("unknown observation serialized")
++	}
++	// Preserve legacy vendor RSRP without inventing an AT+CSQ sample timestamp.
++	a.mu300RefreshModemWithSignal(func() *int { n := -96; return &n })
++	if a.modem.SignalDBM == nil || *a.modem.SignalDBM != -96 || a.modem.SignalObservedAtMS != 0 {
++		t.Fatal("vendor fallback mislabeled as CSQ")
++	}
++	body = send()
++	if _, ok := body["signal_observed_at_ms"]; ok {
++		t.Fatal("vendor heartbeat invented timestamp")
++	}
++	// A new successful observation replaces the expired/unknown sample.
++	response = "+CSQ: 29,99\r\nOK"
++	a.mu300RefreshModemWithSignal(vendor)
++	if a.modem.SignalObservedAtMS <= old || a.modem.SignalDBM == nil || *a.modem.SignalDBM != -55 {
++		t.Fatal("recovery did not record new observation")
++	}
++	w := httptest.NewRecorder()
++	a.status(w, httptest.NewRequest("GET", "/api/status", nil))
++	var local struct {
++		Signal   *int  `json:"signal_dbm"`
++		Observed int64 `json:"signal_observed_at_ms"`
++	}
++	if json.Unmarshal(w.Body.Bytes(), &local) != nil || local.Signal == nil || *local.Signal != -55 || local.Observed != a.modem.SignalObservedAtMS {
++		t.Fatal("local status lost signal observation")
++	}
++	// Active calls skip metadata collection and cannot renew the sample.
++	a.applyCallPoll(parseCLCC(mu300TestActive+"OK"), time.Now())
++	finalObserved := a.modem.SignalObservedAtMS
++	a.mu300RefreshModemWithSignal(func() *int { t.Fatal("active call read vendor signal"); return nil })
++	if a.modem.SignalObservedAtMS != finalObserved {
++		t.Fatal("idle guard renewed observation")
++	}
 +}
 diff --git a/module/module-agent/mu300_signal_test.go b/module/module-agent/mu300_signal_test.go
 new file mode 100644
@@ -9275,7 +9636,7 @@ index 0000000..cdf375f
 +	}
 +}
 diff --git a/module/module-agent/push.go b/module/module-agent/push.go
-index dabc119..af8b4a8 100644
+index dabc119..d9598d6 100644
 --- a/module/module-agent/push.go
 +++ b/module/module-agent/push.go
 @@ -33,6 +33,7 @@ type pushRegistration struct {
@@ -9326,7 +9687,7 @@ index dabc119..af8b4a8 100644
  	Event        string `json:"event"`
  	DeviceID     string `json:"device_id"`
  	DeviceSecret string `json:"device_secret"`
-@@ -115,6 +120,8 @@ type callStatePushEvent struct {
+@@ -115,32 +120,37 @@ type callStatePushEvent struct {
  }
  
  type agentHeartbeatSnapshot struct {
@@ -9335,7 +9696,10 @@ index dabc119..af8b4a8 100644
  	ATOK                 bool
  	CellularState        string
  	CellularRegistration string
-@@ -124,23 +131,24 @@ type agentHeartbeatSnapshot struct {
+ 	CellularRecovery     string
+ 	ECMCarrier           string
+ 	SignalDBM            *int
++	SignalObservedAtMS   int64
  }
  
  type agentHeartbeatEvent struct {
@@ -9374,10 +9738,11 @@ index dabc119..af8b4a8 100644
 +	CellularRecovery      string               `json:"cellular_recovery,omitempty"`
 +	ECMCarrier            string               `json:"ecm_carrier,omitempty"`
 +	SignalDBM             *int                 `json:"signal_dbm,omitempty"`
++	SignalObservedAtMS    int64                `json:"signal_observed_at_ms,omitempty"`
  }
  
  type pushManager struct {
-@@ -339,6 +347,15 @@ func validatePushRegistration(registration pushRegistration) error {
+@@ -339,6 +349,15 @@ func validatePushRegistration(registration pushRegistration) error {
  }
  
  func (p *pushManager) store(registration pushRegistration) error {
@@ -9393,7 +9758,7 @@ index dabc119..af8b4a8 100644
  	registration.DeviceID = strings.TrimSpace(registration.DeviceID)
  	registration.BundleID = strings.TrimSpace(registration.BundleID)
  	registration.RelayURL = strings.TrimRight(strings.TrimSpace(registration.RelayURL), "/")
-@@ -441,6 +458,9 @@ func syncPushConfigDirectory(path string) error {
+@@ -441,6 +460,9 @@ func syncPushConfigDirectory(path string) error {
  }
  
  func (p *pushManager) cloudEnabledLocked() bool {
@@ -9403,7 +9768,7 @@ index dabc119..af8b4a8 100644
  	if p.config.LocalMode {
  		return false
  	}
-@@ -464,17 +484,19 @@ func (p *pushManager) status() pushStatus {
+@@ -464,17 +486,19 @@ func (p *pushManager) status() pushStatus {
  	cloudEnabled := p.cloudEnabledLocked()
  	baseReady := cloudEnabled && p.config.DeviceID != "" && p.config.RelayURL != ""
  	return pushStatus{
@@ -9434,7 +9799,7 @@ index dabc119..af8b4a8 100644
  	}
  }
  
-@@ -482,7 +504,11 @@ func (p *pushManager) sendRegistration() error {
+@@ -482,7 +506,11 @@ func (p *pushManager) sendRegistration() error {
  	p.mu.Lock()
  	registration := p.config
  	client := p.client
@@ -9446,7 +9811,7 @@ index dabc119..af8b4a8 100644
  	if registration.CloudEnabled != nil && !*registration.CloudEnabled {
  		return nil
  	}
-@@ -501,6 +527,10 @@ func (p *pushManager) sendRegistration() error {
+@@ -501,6 +529,10 @@ func (p *pushManager) sendRegistration() error {
  }
  
  func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error) {
@@ -9457,7 +9822,7 @@ index dabc119..af8b4a8 100644
  	if call.Direction != "incoming" || (call.State != "incoming" && call.State != "waiting") {
  		return false, nil
  	}
-@@ -522,10 +552,18 @@ func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error)
+@@ -522,10 +554,18 @@ func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error)
  		generation = p.lastGeneration
  	} else {
  		var err error
@@ -9480,7 +9845,7 @@ index dabc119..af8b4a8 100644
  		}
  		secret, err = randomCallSecret()
  		if err != nil {
-@@ -601,9 +639,10 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+@@ -601,9 +641,10 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
  	p.mu.Unlock()
  
  	payload := incomingSMSPushEvent{
@@ -9493,7 +9858,7 @@ index dabc119..af8b4a8 100644
  		Timestamp: message.Timestamp.UTC().Format(time.RFC3339Nano),
  	}
  	err := p.postJSON(client, registration.RelayURL+"/v1/events/sms", payload)
-@@ -626,8 +665,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
+@@ -626,8 +667,8 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
  	return true, nil
  }
  
@@ -9504,7 +9869,7 @@ index dabc119..af8b4a8 100644
  		(owner != "watch" && owner != "iphone") ||
  		(phase != "active" && phase != "ended") {
  		return errors.New("通话所有权事件无效")
-@@ -636,7 +675,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
+@@ -636,7 +677,6 @@ func (p *pushManager) sendCallOwner(callID, callUUID, owner, phase string) error
  	registration := p.config
  	client := p.client
  	cloudEnabled := p.cloudEnabledLocked()
@@ -9512,7 +9877,7 @@ index dabc119..af8b4a8 100644
  	p.mu.Unlock()
  	if !cloudEnabled || registration.RelayURL == "" || registration.AlertToken == "" {
  		return nil
-@@ -698,17 +736,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
+@@ -698,17 +738,22 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
  	if !cloudEnabled || registration.RelayURL == "" {
  		return nil
  	}
@@ -9533,11 +9898,11 @@ index dabc119..af8b4a8 100644
  		CellularRegistration: snapshot.CellularRegistration,
  		CellularRecovery:     snapshot.CellularRecovery, ECMCarrier: snapshot.ECMCarrier,
 -		SignalDBM: snapshot.SignalDBM,
-+		SignalDBM: snapshot.SignalDBM, Battery: snapshot.Battery,
++		SignalDBM: snapshot.SignalDBM, SignalObservedAtMS: snapshot.SignalObservedAtMS, Battery: snapshot.Battery,
  	})
  }
  
-@@ -925,7 +968,7 @@ func (a *agent) scheduleIncomingPush(callID string) {
+@@ -925,7 +970,7 @@ func (a *agent) scheduleIncomingPush(callID string) {
  			if attempt > 0 {
  				time.Sleep(time.Duration(1<<attempt) * time.Second)
  			}

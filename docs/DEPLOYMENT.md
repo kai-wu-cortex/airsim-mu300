@@ -1,8 +1,8 @@
-# AirSIM for MU300 一体部署手册（R27 开发预览）
+# AirSIM for MU300 一体部署手册（R28 开发预览）
 
-> R27 修复信号读取、短信源兼容及 IMS 来电号码展示，并提供离线恢复附件。保留 R26 取消固定16条配对限制的修复，保留已有配对；后台支持确认后单项删除。沿用新版 LuCI、上下行音量增益、配对码时钟修复和受保护的 7.3 手动切换入口；保留 Tailscale 与云端缓冲。候选已在 U30 Air 安装并完成基础检查，完整通话和新功能验收仍待完成。详见 [R27 说明](RELEASE_v0.1.0-r27.md)。
+> R28 增加冷启动云端接听身份修复和真实 CSQ 采样时间，保留既有短信、配对、LuCI、音量、Tailscale 和离线恢复功能。接听候选已有用户短通话验收；厂商 RSRP 回退的云端信号显示尚未完整解决。详见 [R28 说明](RELEASE_v0.1.0-r28.md)。
 
-> **客户端兼容：** 云端接通前公告需要发送 `early_media_version: 1` 并识别 `early_media_ready_v1` 的新版 AirSIM。未协商的旧客户端只等待正常接通后双向音频；请先更新客户端。R27 是开发预览版，开启预览频道后 R22 用户可检查更新或使用下方安装脚本升级。
+> **客户端兼容：** 云端接通前公告需要发送 `early_media_version: 1` 并识别 `early_media_ready_v1` 的新版 AirSIM。未协商的旧客户端只等待正常接通后双向音频；请先更新客户端。R28 是开发预览版，开启预览频道后 R22 用户可检查更新或使用下方安装脚本升级。
 
 > [!WARNING]
 > 当前一体包只覆盖已验证 U30 Air 的 `5.4.254-gb50db5b6224c` 内核及配置 `1057cb97e0d2d7f26816e8bf7841faac1153833a01d4893cdc196b75ae6356b3`。F50 / 7.2.8 不在适用范围。R17 在 U30 Air 上的升级、重启自动准备及两通双向通话验收已通过，长通话仍未完整验收。
@@ -15,7 +15,7 @@
 
 ## 一次安装
 
-本手册安装 R27 开发预览版。原通话确认结束后，可用新操作立即拨打同一号码，同一操作 ID 重试不会再次拨出；仍需满足实际通话空闲条件，见 [说明](R18_REDIAL.md)。发布边界见 [R27 说明](RELEASE_v0.1.0-r27.md)。
+本手册安装 R28 开发预览版。原通话确认结束后，可用新操作立即拨打同一号码，同一操作 ID 重试不会再次拨出；仍需满足实际通话空闲条件，见 [说明](R18_REDIAL.md)。发布边界见 [R28 说明](RELEASE_v0.1.0-r28.md)。
 
 先结束通话及短信任务，保存已有配置和可信回退包。软件包是 OpenWrt APK v3，不是 Android APK。
 
@@ -23,7 +23,7 @@
 
 ```sh
 cd /tmp
-wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r27/install.sh
+wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r28/install.sh
 cat airsim-install.sh
 sh airsim-install.sh --check
 sh airsim-install.sh --install
@@ -33,7 +33,7 @@ sh airsim-install.sh --install
 
 ## LuCI 手动上传
 
-从同一 Release 获取 `luci-app-airsim-0.1.0-r27.apk`、`airsim-dev.pem` 和校验清单。核对公钥 SHA-256 `0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de` 并导入公钥，验证 APK 后上传安装，不忽略签名或依赖。APK 钩子会执行同样的音频准备检查；必须以安装结果和 LuCI 准备状态判断是否完成，不能只看软件包出现在列表中。
+从同一 Release 获取 `luci-app-airsim-0.1.0-r28.apk`、`airsim-dev.pem` 和校验清单。核对公钥 SHA-256 `0ce703e76ea4b702194c54b90534d7127874bb38ecda17f7ed6b1add2d2cf1de` 并导入公钥，验证 APK 后上传安装，不忽略签名或依赖。APK 钩子会执行同样的音频准备检查；必须以安装结果和 LuCI 准备状态判断是否完成，不能只看软件包出现在列表中。
 
 ## 看安装结果
 
@@ -67,13 +67,13 @@ Tailscale 手动 IP 配对：先让设备和 iPhone 加入允许互访的网络�
 
 R19 包含收件箱同步、保存确认与发送，每条最多 70 字，不支持 emoji 或长短信拆分。配对后会同步原生收件箱；仅用户主动发送时提交短信，不自动发送测试消息。真实收发、后台推送及云端路径尚未验收，详见 [短信说明](AIRSIM_SMS.md)。
 
-R27 增加「AirSIM 手机短信链路」诊断；原生目录优先，缺失时支持指定格式的 E5 JSON
+沿用 R27 增加的「AirSIM 手机短信链路」诊断；原生目录优先，缺失时支持指定格式的 E5 JSON
 收件库和私有完整快照。并非任何缺少短信服务的固件都能自动收件，详见
 [支持范围](SMS_COMPAT_SNAPSHOT.md)。原生发送包装器缺失时只使用已校验的固定工具版本，失败不重发。
 
 ## 离线恢复附件
 
-同版 Release 的 `airsim-mu300-0.1.0-r27-recovery.tar.gz` 保存 17 项固定依赖及来源说明，
+同版 Release 的 `airsim-mu300-0.1.0-r28-recovery.tar.gz` 保存 17 项固定依赖及来源说明，
 与源码包配套使用。它是构建恢复材料，不要直接把归档解到设备根目录。
 使用前核对 Release 校验清单和签名，按 [离线恢复说明](OFFLINE_RECOVERY.md) 恢复。
 完整 APK 本身已有 DSP 备用副本，普通升级不需要下载此附件。

@@ -1,6 +1,6 @@
 # AirSIM for MU300 — OpenWrt LuCI 通话网关插件
 
-> **R27 · 信号、短信兼容与来电号码修复（开发预览）**。补齐信号读取、短信源兼容和 IMS 来电号码展示，附带可校验的离线恢复材料。用户已确认测试并要求发布。见 [R27 发布说明](docs/RELEASE_v0.1.0-r27.md)。
+> **R28 · 云端接听身份与信号采样时间修复（开发预览）**。修复来电号码变为 +86/TEL 时误结束原通话的问题，补充云端信号真实采样时间。厂商 RSRP 回退的云端显示仍有限制，见 [R28 发布说明](docs/RELEASE_v0.1.0-r28.md)。
 
 - **Tailscale 配对：** 在 LuCI 管理页填写可选 `tailscale0` 接口，两端先连接 Tailscale，再用设备 IP、配对端口和六位码配对。本地配对只保存网关密钥，保留原 Relay 配置；不内嵌 Tailscale、不自动修改防火墙。见 [使用说明](docs/TAILSCALE_PAIRING.md)。
 - **云端缓冲：** 支持 iPhone 新版的自动、稳定优先及手动 240/480/720/960 ms。U30 自动策略保持原来的 200–600 ms；稳定优先为 240–720 ms，手动 720 ms 为 36 帧预缓冲。只影响接收播放，重连保留选择并清空旧音频。见 [协议与测试](docs/CLOUD_AUDIO_BUFFER.md)。
@@ -17,20 +17,27 @@ R22 云端接通前运营商语音要求客户端发送 `early_media_version: 1`
 此前 R20 的配对修复候选已安装 U30 Air，用户确认 iPhone 保持云模式、连续两次使用新验证码配对成功；设备身份和原配对保留，云连接正常。R23 完整 APK 未单独完成实机升级回归，其他功能不因配对通过而视为已验收，见 [R23 发布说明](docs/RELEASE_v0.1.0-r23.md)。
 
 > [!WARNING]
-> **R27 沿用 R17 的 U30 Air 一体安装方案，当前仅提供匹配 `5.4.254-gb50db5b6224c` 及指定内核配置的音频扩展。F50 / 7.2.8 尚未适配，不能仅凭“1031 之后”判断兼容。**
+> **R28 沿用 R17 的 U30 Air 一体安装方案，当前仅提供匹配 `5.4.254-gb50db5b6224c` 及指定内核配置的音频扩展。F50 / 7.2.8 尚未适配，不能仅凭“1031 之后”判断兼容。**
 > 安装器会检查音频扩展匹配条件。R17 实机升级、重启自动续接及重启后两通双向通话已通过验收；R19 新增功能尚未完成整体验收；本次早期媒体已有 VoWLAN 与云端提示音、计时和接通后双向声音的用户确认。
 
 F50 部署独立维护在 [F50 分支](https://github.com/kai-wu-cortex/airsim-mu300/tree/F50)，不包含在本 U30 Air Release 中，不能用此安装包替代 F50 部署步骤。
 
 将运行 mu300-linux OpenWrt 的 U30 Air 接入 AirSIM。它是 LuCI 插件、Linux Agent 和音频桥，不是 Android APK 或完整系统镜像。
 
-[下载 Release](https://github.com/kai-wu-cortex/airsim-mu300/releases) · [一体部署手册](docs/DEPLOYMENT.md) · [R27 说明](docs/RELEASE_v0.1.0-r27.md) · [硬件适配指南](HARDWARE_ADAPTATION.md)
+[下载 Release](https://github.com/kai-wu-cortex/airsim-mu300/releases) · [一体部署手册](docs/DEPLOYMENT.md) · [R28 说明](docs/RELEASE_v0.1.0-r28.md) · [硬件适配指南](HARDWARE_ADAPTATION.md)
 
-**R27 把插件、已重建音频模块、工具和准备流程合并到一个签名 APK。** 首次缺少 DSP 固件时，从上游固定地址下载并校验，失败时使用包内固定备用副本；已有文件保留。首次需要重启时，明确提示重启进入 OpenWrt 一次，随后自动继续准备。无需用户单独下载音频扩展或运行恢复命令。系统镜像、内核、客户端与配对配置保持原样。
+**R28 把插件、已重建音频模块、工具和准备流程合并到一个签名 APK。** 首次缺少 DSP 固件时，从上游固定地址下载并校验，失败时使用包内固定备用副本；已有文件保留。首次需要重启时，明确提示重启进入 OpenWrt 一次，随后自动继续准备。无需用户单独下载音频扩展或运行恢复命令。系统镜像、内核、客户端与配对配置保持原样。
 
 已有 R16 恢复扩展会在内容匹配后复用；不覆盖未知扩展或自定义准备脚本。R15 已撤回。**历史版本线：R16 面向 1031 之后的系统，R12 面向 1031 之前的系统。** 日期标签不能替代硬件、内核配置与音频 ABI 检查，也不代表所有新版系统均可通话。
 
 ## 功能
+
+### R28 接听与信号修复
+
+- 同一 CLCC 槽位中完全对应的大陆移动号码与显式 +86/TEL 格式保持原通话身份，避免接听后错误结束云端会话。限定格式比较，不放宽拨号、短信或认证。用户已确认 11 月 25 日候选的冷启动接听和双向声音正常。
+- 仅将精确 Relay 状态通知与控制命令区分，携带额外动作或身份字段仍须校验。
+- 云端新增可选 `signal_observed_at_ms`：来自成功 CSQ 采样，失败和重复心跳不续期。厂商 RSRP 回退没有伪造时间，依赖该路径的固件仍需后续协议适配，不能宣称灵动岛问题全面解决。
+- 延续源码、固定依赖和独立离线恢复附件；本版不修改 iOS/Android、Relay、系统或内核。
 
 ### R27 修复与离线恢复
 
@@ -121,13 +128,13 @@ R16 的音频实现已由用户确认短时局域网双向声音清晰、卡顿�
 
 ## 快速安装
 
-以下命令安装 R27 开发预览版；LuCI 更新器需开启预览频道才能发现该版本。安装前阅读适用范围和未验收项，并保存原版包以便回退。
+以下命令安装 R28 开发预览版；LuCI 更新器需开启预览频道才能发现该版本。安装前阅读适用范围和未验收项，并保存原版包以便回退。
 
 先结束全部电话与短信任务，并确认设备符合上表。在设备 SSH 终端执行：
 
 ```sh
 cd /tmp
-wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r27/install.sh
+wget -O airsim-install.sh https://github.com/kai-wu-cortex/airsim-mu300/releases/download/v0.1.0-r28/install.sh
 cat airsim-install.sh
 sh airsim-install.sh --check
 sh airsim-install.sh --install
